@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>PS3 Web OS</title>
+<link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+<div id="topbar">PS3 WEB OS</div>
+
+<div id="menu">
+  <button onclick="openApp('home')">Home</button>
+  <button onclick="openApp('editor')">Editor</button>
+  <button onclick="openApp('files')">Files</button>
+</div>
+
+<!-- HOME -->
+<div class="app" id="home">
+  <h2>Dashboard</h2>
+  <p>PS3 Web System Running...</p>
+</div>
+
+<!-- EDITOR -->
+<div class="app" id="editor" style="display:none;">
+  <h2>Code Editor</h2>
+
+  <textarea id="code"><!DOCTYPE html>
+<html>
+<body>
+<h1>Hello PS3</h1>
+</body>
+</html>
+  </textarea>
+
+  <button onclick="runCode()">RUN</button>
+  <button onclick="saveFile()">SAVE</button>
+
+  <iframe id="preview"></iframe>
+</div>
+
+<!-- FILES -->
+<div class="app" id="files" style="display:none;">
+  <h2>File Manager</h2>
+
+  <input id="filename" placeholder="file name.html">
+
+  <button onclick="loadFiles()">Refresh</button>
+
+  <ul id="fileList"></ul>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
