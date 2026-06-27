@@ -2,34 +2,34 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>PS3 Web OS</title>
+<title>PS3 Web OS v2</title>
 <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
 
-<div id="topbar">PS3 WEB OS</div>
+<div id="topbar">PS3 WEB OS v2</div>
 
 <div id="menu">
-  <button onclick="openApp('home')">Home</button>
-  <button onclick="openApp('editor')">Editor</button>
-  <button onclick="openApp('files')">Files</button>
+  <button onclick="openTab('home')">Home</button>
+  <button onclick="openTab('editor')">Editor</button>
+  <button onclick="openTab('files')">Files</button>
 </div>
 
 <!-- HOME -->
-<div class="app" id="home">
+<div id="home" class="tab">
   <h2>Dashboard</h2>
-  <p>PS3 Web System Running...</p>
+  <p>Status: Online</p>
 </div>
 
 <!-- EDITOR -->
-<div class="app" id="editor" style="display:none;">
+<div id="editor" class="tab" style="display:none;">
   <h2>Code Editor</h2>
 
   <textarea id="code"><!DOCTYPE html>
 <html>
 <body>
-<h1>Hello PS3</h1>
+<h1>Hello PS3 v2</h1>
 </body>
 </html>
   </textarea>
@@ -41,10 +41,8 @@
 </div>
 
 <!-- FILES -->
-<div class="app" id="files" style="display:none;">
+<div id="files" class="tab" style="display:none;">
   <h2>File Manager</h2>
-
-  <input id="filename" placeholder="file name.html">
 
   <button onclick="loadFiles()">Refresh</button>
 
