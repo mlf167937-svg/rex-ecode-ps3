@@ -1,10 +1,10 @@
-// NAVIGATION SYSTEM
-function openApp(app) {
-  var apps = document.getElementsByClassName("app");
-  for (var i = 0; i < apps.length; i++) {
-    apps[i].style.display = "none";
+// TAB SYSTEM
+function openTab(id) {
+  var tabs = document.getElementsByClassName("tab");
+  for (var i = 0; i < tabs.length; i++) {
+    tabs[i].style.display = "none";
   }
-  document.getElementById(app).style.display = "block";
+  document.getElementById(id).style.display = "block";
 }
 
 // RUN CODE
@@ -17,22 +17,27 @@ function runCode() {
   iframe.contentWindow.document.close();
 }
 
-// SAVE FILE (localStorage)
+// SAVE FILE
 function saveFile() {
   var name = prompt("File name:");
   var code = document.getElementById("code").value;
 
-  if (name) {
-    localStorage.setItem(name, code);
-    alert("Saved!");
-    loadFiles();
-  }
+  if (!name) return;
+
+  localStorage.setItem(name, code);
+  alert("Saved!");
+  loadFiles();
 }
 
-// LOAD FILE LIST
+// LOAD FILES
 function loadFiles() {
   var list = document.getElementById("fileList");
   list.innerHTML = "";
+
+  if (localStorage.length === 0) {
+    list.innerHTML = "<li>No files</li>";
+    return;
+  }
 
   for (var i = 0; i < localStorage.length; i++) {
     var key = localStorage.key(i);
@@ -50,9 +55,8 @@ function loadFiles() {
 
 // OPEN FILE
 function openFile(name) {
-  var data = localStorage.getItem(name);
-  document.getElementById("code").value = data;
-  openApp("editor");
+  document.getElementById("code").value = localStorage.getItem(name);
+  openTab("editor");
 }
 
 // DELETE FILE
