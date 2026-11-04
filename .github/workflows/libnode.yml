@@ -8,36 +8,28 @@ permissions:
   contents: read
 
 env:
-  NODE_VERSION: v26.13.0
+  NODE_VERSION: "26.13.0"
   ANDROID_API: "24"
 
 jobs:
   build:
-    name: Build ${{ matrix.abi }}
     runs-on: ubuntu-24.04
-
     strategy:
       fail-fast: false
       matrix:
         include:
           - abi: arm64-v8a
             arch: arm64
-            cpu: arm64
-            prefix: aarch64-linux-android
-            sysroot: aarch64-linux-android
-
+            elf: AArch64
+            ndk_libdir: aarch64-linux-android
           - abi: armeabi-v7a
             arch: arm
-            cpu: arm
-            prefix: armv7a-linux-androideabi
-            sysroot: arm-linux-androideabi
+            elf: ARM
+            ndk_libdir: arm-linux-androideabi
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Prepare logs
-        run: mkdir -p logs/${{ matrix.abi }} dist
 
       - name: Setup Android NDK
         id: ndk
@@ -45,84 +37,119 @@ jobs:
         with:
           ndk-version: r27d
 
+      - name: Prepare directories
+        run: |
+          mkdir -p node-src
+          mkdir -p logs/${{ matrix.abi }}
+          mkdir -p dist
+
       - name: Download Node.js source
+        shell: bash
         run: |
           set -Eeuo pipefail
-          git clone --depth 1 --branch "$NODE_VERSION" https://github.com/nodejs/node.git node-src 2>&1 | tee "logs/${{ matrix.abi }}/download.log"
+
+          curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.xz"
+          curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"
+
+          grep " node-v${NODE_VERSION}.tar.xz$" SHASUMS256.txt | sha256sum -c -
+
+          tar -xJf "node-v${NODE_VERSION}.tar.xz" \
+            --strip-components=1 \
+            -C node-src
 
       - name: Configure Android
         working-directory: node-src
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_API: ${{ env.ANDROID_API }}
           ARCH: ${{ matrix.arch }}
           ABI: ${{ matrix.abi }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          exec > >(tee "../logs/${ABI}/configure.log") 2>&1
 
-          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+          LOG="$GITHUB_WORKSPACE/logs/$ABI/configure.log"
 
-          test -d "$TOOLCHAIN"
-          test -x "$TOOLCHAIN/bin/${{ matrix.prefix }}${ANDROID_API}-clang"
+          exec > >(tee "$LOG") 2>&1
 
-          export PATH="$TOOLCHAIN/bin:$PATH"
-          export CC="$TOOLCHAIN/bin/${{ matrix.prefix }}${ANDROID_API}-clang"
-          export CXX="$TOOLCHAIN/bin/${{ matrix.prefix }}${ANDROID_API}-clang++"
+          trap 'status=$?; { echo "## Android configure failed: $ABI"; tail -n 100 "$LOG"; } >> "$GITHUB_STEP_SUMMARY"; exit "$status"' ERR
 
-          export GYP_DEFINES="target_arch=${ARCH} v8_target_arch=${ARCH} android_target_arch=${ARCH} host_os=linux OS=android android_ndk_path=${ANDROID_NDK_HOME}"
+          test -d "$ANDROID_NDK_HOME"
 
-          "$CC" --version
-          "$CXX" --version
+          echo 'LDFLAGS=-llog' >> "$GITHUB_ENV"
+          export LDFLAGS="-llog"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path("android_configure.py")
+          source = path.read_text()
+
+          old = 'os.system("./configure --dest-cpu=" + DEST_CPU + " --dest-os=android --openssl-no-asm --cross-compiling")'
+
+          new = 'if os.system("./configure --dest-cpu=" + DEST_CPU + " --dest-os=android --openssl-no-asm --cross-compiling --shared") != 0:\n    sys.exit(1)'
+
+          if old not in source:
+              sys.exit("Could not locate Android configure command")
+
+          path.write_text(source.replace(old, new, 1))
+          PY
 
           ./android-configure patch
 
-          ./configure \
-            --dest-cpu="${{ matrix.cpu }}" \
-            --dest-os=android \
-            --openssl-no-asm \
-            --cross-compiling \
-            --shared
+          ./android-configure \
+            "$ANDROID_NDK_HOME" \
+            "$ANDROID_API" \
+            "$ARCH"
 
           test -f out/Makefile
           test -f out/config.gypi
 
-          grep -n "node_shared" out/config.gypi
-
-      - name: Compile libnode
+      - name: Compile Node.js
         working-directory: node-src
         env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ABI: ${{ matrix.abi }}
-          SYSROOT: ${{ matrix.sysroot }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          exec > >(tee "../logs/${ABI}/compile.log") 2>&1
 
-          make -C out -j2 BUILDTYPE=Release libnode
+          LOG="$GITHUB_WORKSPACE/logs/$ABI/compile.log"
 
-          LIBNODE="$(find out/Release -type f -name 'libnode.so' -print -quit)"
+          exec > >(tee "$LOG") 2>&1
+
+          trap 'status=$?; { echo "## Compilation failed: $ABI"; tail -n 100 "$LOG"; } >> "$GITHUB_STEP_SUMMARY"; exit "$status"' ERR
+
+          export LDFLAGS="-llog"
+
+          make -j2
+
+          LIBNODE="$(find out/Release \
+            \( -type f -o -type l \) \
+            -name 'libnode.so*' \
+            -print -quit)"
 
           if [ -z "$LIBNODE" ]; then
             find out -name 'libnode*' -print
             exit 1
           fi
 
-          mkdir -p "../dist/${ABI}"
+          mkdir -p "../dist/$ABI"
 
-          cp "$LIBNODE" "../dist/${ABI}/libnode.so"
+          cp -L "$LIBNODE" "../dist/$ABI/libnode.so"
 
           LLVM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          if "$LLVM/llvm-readelf" -d "../dist/${ABI}/libnode.so" | grep -q 'libc++_shared.so'; then
-            cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${SYSROOT}/libc++_shared.so" "../dist/${ABI}/"
+          "$LLVM/llvm-strip" --strip-debug "../dist/$ABI/libnode.so"
+
+          "$LLVM/llvm-readelf" -h "../dist/$ABI/libnode.so"
+          "$LLVM/llvm-readelf" -d "../dist/$ABI/libnode.so"
+
+          "$LLVM/llvm-readelf" -h "../dist/$ABI/libnode.so" | grep -q "${{ matrix.elf }}"
+
+          if "$LLVM/llvm-readelf" -d "../dist/$ABI/libnode.so" | grep -q 'libc++_shared.so'; then
+            cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.ndk_libdir }}/libc++_shared.so" "../dist/$ABI/"
           fi
-
-          "$LLVM/llvm-strip" --strip-debug "../dist/${ABI}/libnode.so"
-
-          "$LLVM/llvm-readelf" -h "../dist/${ABI}/libnode.so"
-          "$LLVM/llvm-readelf" -d "../dist/${ABI}/libnode.so"
 
       - name: Collect headers
         if: matrix.abi == 'arm64-v8a'
@@ -157,7 +184,6 @@ jobs:
           retention-days: 14
 
   package:
-    name: Package RexChat libraries
     needs: build
     if: needs.build.result == 'success'
     runs-on: ubuntu-24.04
@@ -170,15 +196,15 @@ jobs:
           path: merged
           merge-multiple: true
 
-      - name: Create ZIP
+      - name: Package ZIP
         run: |
           mkdir -p RexChat-libnode
           cp -a merged/. RexChat-libnode/
-          zip -qr RexChat-libnode-v26.13.0.zip RexChat-libnode
+          zip -qr RexChat-libnode-v${NODE_VERSION}.zip RexChat-libnode
 
       - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: RexChat-libnode-v26.13.0
-          path: RexChat-libnode-v26.13.0.zip
+          name: RexChat-libnode-v${{ env.NODE_VERSION }}
+          path: RexChat-libnode-v${{ env.NODE_VERSION }}.zip
           retention-days: 30
