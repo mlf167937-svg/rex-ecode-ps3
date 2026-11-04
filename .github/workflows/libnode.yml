@@ -1,0 +1,160 @@
+
+name: Build Android libnode
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: v26.13.0
+  ANDROID_API: "24"
+
+jobs:
+  build:
+    name: Build ${{ matrix.abi }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            arch: arm64
+            triple: aarch64-linux-android
+          - abi: armeabi-v7a
+            arch: arm
+            triple: arm-linux-androideabi
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27d
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf zip
+
+      - name: Download Node.js source
+        run: |
+          git clone --depth 1 --branch "$NODE_VERSION" https://github.com/nodejs/node.git node-src
+
+      - name: Configure and compile
+        working-directory: node-src
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          export CC_host="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          export CXX_host="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+          export LDFLAGS="-llog -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("android_configure.py")
+          source = path.read_text()
+          old = 'os.system("./configure --dest-cpu=" + DEST_CPU + " --dest-os=android --openssl-no-asm --cross-compiling")'
+          new = 'os.system("./configure --dest-cpu=" + DEST_CPU + " --dest-os=android --openssl-no-asm --cross-compiling --shared")'
+
+          if old not in source:
+              raise SystemExit("Android configure patch target not found")
+
+          path.write_text(source.replace(old, new))
+          PY
+
+          ./android-configure "$ANDROID_NDK_HOME" "$ANDROID_API" "${{ matrix.arch }}"
+
+          test -f out/Makefile
+
+          make -C out BUILDTYPE=Release libnode -j2
+
+      - name: Collect and verify library
+        working-directory: node-src
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          LLVM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          LIBNODE="$(find -L out/Release -type f -name 'libnode.so*' | sort | head -n 1)"
+
+          if [ -z "$LIBNODE" ]; then
+            find out -name 'libnode*' -print
+            exit 1
+          fi
+
+          mkdir -p "../dist/${{ matrix.abi }}"
+
+          cp "$LIBNODE" "../dist/${{ matrix.abi }}/libnode.so"
+
+          patchelf --set-soname libnode.so "../dist/${{ matrix.abi }}/libnode.so"
+
+          "$LLVM/llvm-strip" --strip-debug "../dist/${{ matrix.abi }}/libnode.so"
+
+          "$LLVM/llvm-readelf" -h "../dist/${{ matrix.abi }}/libnode.so"
+
+          "$LLVM/llvm-readelf" -d "../dist/${{ matrix.abi }}/libnode.so"
+
+          "$LLVM/llvm-readelf" -l "../dist/${{ matrix.abi }}/libnode.so"
+
+          if "$LLVM/llvm-readelf" -d "../dist/${{ matrix.abi }}/libnode.so" | grep -q 'libc++_shared.so'; then
+            cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.triple }}/libc++_shared.so" "../dist/${{ matrix.abi }}/"
+          fi
+
+          "$LLVM/llvm-readelf" -l "../dist/${{ matrix.abi }}/libnode.so" | grep -q '0x4000'
+
+      - name: Collect headers
+        if: matrix.abi == 'arm64-v8a'
+        working-directory: node-src
+        run: |
+          mkdir -p ../dist/headers/node
+          mkdir -p ../dist/headers/v8
+          mkdir -p ../dist/headers/uv
+
+          find src -maxdepth 1 -type f \( -name '*.h' -o -name '*.inc' \) -exec cp {} ../dist/headers/node/ \;
+
+          cp -a deps/v8/include/. ../dist/headers/v8/
+          cp -a deps/uv/include/. ../dist/headers/uv/
+
+      - name: Upload architecture artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libnode-${{ matrix.abi }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  package:
+    name: Package final ZIP
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download architecture artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: libnode-*
+          path: merged
+          merge-multiple: true
+
+      - name: Create ZIP
+        run: |
+          mkdir -p RexChat-libnode
+          cp -a merged/. RexChat-libnode/
+
+          zip -qr "RexChat-libnode-${NODE_VERSION}.zip" RexChat-libnode
+
+        env:
+          NODE_VERSION: v26.13.0
+
+      - name: Upload final ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: RexChat-libnode-${{ env.NODE_VERSION }}
+          path: RexChat-libnode-${{ env.NODE_VERSION }}.zip
+          retention-days: 30
