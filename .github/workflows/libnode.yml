@@ -21,12 +21,16 @@ jobs:
       matrix:
         include:
           - abi: arm64-v8a
+            dest_cpu: arm64
             arch: arm64
+            toolchain_prefix: aarch64-linux-android
             expected_elf: AArch64
             ndk_libdir: aarch64-linux-android
 
           - abi: armeabi-v7a
+            dest_cpu: arm
             arch: arm
+            toolchain_prefix: armv7a-linux-androideabi
             expected_elf: ARM
             ndk_libdir: arm-linux-androideabi
 
@@ -34,117 +38,66 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare directories
-        run: |
-          mkdir -p logs/${{ matrix.abi }}
-          mkdir -p dist
-
       - name: Setup Android NDK
         id: ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r27d
+          ndk-version: r28
 
       - name: Download Node.js source
         shell: bash
         run: |
           set -Eeuo pipefail
-
-          LOG="logs/${{ matrix.abi }}/download.log"
-          exec > >(tee "$LOG") 2>&1
-
-          curl -fL \
-            "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.xz" \
-            -o "node-v${NODE_VERSION}.tar.xz"
-
-          curl -fL \
-            "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" \
-            -o SHASUMS256.txt
-
+          
+          curl -fL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.xz" -o "node-v${NODE_VERSION}.tar.xz"
+          curl -fL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o SHASUMS256.txt
           grep " node-v${NODE_VERSION}.tar.xz$" SHASUMS256.txt | sha256sum -c -
-
+          
           mkdir -p node-src
+          tar -xJf "node-v${NODE_VERSION}.tar.xz" --strip-components=1 -C node-src
 
-          tar -xJf "node-v${NODE_VERSION}.tar.xz" \
-            --strip-components=1 \
-            -C node-src
-
-          test -f node-src/android-configure
-          test -f node-src/android_configure.py
-          test -f node-src/configure
-
-      - name: Patch Android configure
+      - name: Patch Node.js for Android
         working-directory: node-src
         shell: bash
         run: |
           set -Eeuo pipefail
-
-          LOG="$GITHUB_WORKSPACE/logs/${{ matrix.abi }}/patch.log"
-          exec > >(tee "$LOG") 2>&1
-
-          python3 - <<'PY'
-          from pathlib import Path
-          import sys
-
-          path = Path("android_configure.py")
-          lines = path.read_text().splitlines()
-
-          matches = [
-              i for i, line in enumerate(lines)
-              if 'os.system("./configure --dest-cpu="' in line
-          ]
-
-          if len(matches) != 1:
-              sys.exit("Unexpected android_configure.py structure")
-
-          index = matches[0]
-          indent = lines[index][:len(lines[index]) - len(lines[index].lstrip())]
-
-          command = (
-              'os.system("./configure --dest-cpu=" + DEST_CPU '
-              '+ " --dest-os=android --openssl-no-asm '
-              '--cross-compiling --shared")'
-          )
-
-          lines[index] = indent + "status = " + command
-          lines.insert(index + 1, indent + "if status != 0:")
-          lines.insert(index + 2, indent + "    sys.exit(1)")
-
-          path.write_text("\n".join(lines) + "\n")
-          PY
-
-          python3 -m py_compile android_configure.py
+          
+          # Terapkan patch bawaan (seperti trap-handler.h) jika tersedia
+          if [ -f "android_configure.py" ]; then
+            python3 android_configure.py patch || echo "No built-in python patches applied."
+          fi
 
       - name: Configure Android
         working-directory: node-src
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-          ABI: ${{ matrix.abi }}
-          ARCH: ${{ matrix.arch }}
           ANDROID_API: ${{ env.ANDROID_API }}
+          ARCH: ${{ matrix.arch }}
+          DEST_CPU: ${{ matrix.dest_cpu }}
+          PREFIX: ${{ matrix.toolchain_prefix }}
         shell: bash
         run: |
           set -Eeuo pipefail
-
-          LOG="$GITHUB_WORKSPACE/logs/$ABI/configure.log"
-          exec > >(tee "$LOG") 2>&1
-
-          test -d "$ANDROID_NDK_HOME"
-
+          
           echo "NDK: $ANDROID_NDK_HOME"
           echo "Android API: $ANDROID_API"
           echo "Architecture: $ARCH"
-
-          ./android-configure patch
-
-          ./android-configure \
-            "$ANDROID_NDK_HOME" \
-            "$ANDROID_API" \
-            "$ARCH"
-
-          test -f out/Makefile
-          test -f out/config.gypi
-
+          
+          TOOLCHAIN_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          
+          export CC="$TOOLCHAIN_BIN/${PREFIX}${ANDROID_API}-clang"
+          export CXX="$TOOLCHAIN_BIN/${PREFIX}${ANDROID_API}-clang++"
+          export AR="$TOOLCHAIN_BIN/llvm-ar"
+          
+          export GYP_DEFINES="target_arch=$ARCH v8_target_arch=$ARCH android_target_arch=$ARCH host_os=linux OS=android android_ndk_path=$ANDROID_NDK_HOME"
+          
+          ./configure \
+            --dest-cpu="$DEST_CPU" \
+            --dest-os=android \
+            --openssl-no-asm \
+            --cross-compiling \
+            --shared
+            
           echo "Configuration successful"
 
       - name: Compile libnode
@@ -157,52 +110,29 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-
-          LOG="$GITHUB_WORKSPACE/logs/$ABI/compile.log"
-          exec > >(tee "$LOG") 2>&1
-
-          make -j4
-
+          
+          # Gunakan -j2 untuk mencegah kehabisan RAM (OOM) pada runner GitHub
+          make -j2
+          
           LLVM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-
-          LIBNODE="$(find -L out \
-            -type f \
-            -name 'libnode.so' \
-            -print -quit)"
-
+          LIBNODE="$(find -L out -type f -name 'libnode.so' -print -quit)"
+          
           if [ -z "$LIBNODE" ]; then
-            echo "libnode.so not found"
+            echo "Error: libnode.so not found!"
             find out -iname '*libnode*' -print
             exit 1
           fi
-
+          
           mkdir -p "../dist/$ABI"
-
           cp "$LIBNODE" "../dist/$ABI/libnode.so"
-
-          "$LLVM/llvm-strip" \
-            --strip-debug \
-            "../dist/$ABI/libnode.so"
-
-          "$LLVM/llvm-readelf" \
-            -h "../dist/$ABI/libnode.so"
-
-          "$LLVM/llvm-readelf" \
-            -d "../dist/$ABI/libnode.so"
-
-          "$LLVM/llvm-readelf" \
-            -h "../dist/$ABI/libnode.so" |
-            grep -q "$EXPECTED_ELF"
-
-          if "$LLVM/llvm-readelf" \
-            -d "../dist/$ABI/libnode.so" |
-            grep -q 'libc++_shared.so'; then
-
-            cp \
-              "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/$NDK_LIBDIR/libc++_shared.so" \
-              "../dist/$ABI/"
+          
+          "$LLVM/llvm-strip" --strip-debug "../dist/$ABI/libnode.so"
+          "$LLVM/llvm-readelf" -h "../dist/$ABI/libnode.so" | grep -q "$EXPECTED_ELF"
+          
+          if "$LLVM/llvm-readelf" -d "../dist/$ABI/libnode.so" | grep -q 'libc++_shared.so'; then
+            cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/$NDK_LIBDIR/libc++_shared.so" "../dist/$ABI/"
           fi
-
+          
           echo "Library successfully collected"
 
       - name: Collect headers
@@ -211,16 +141,12 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-
+          
           mkdir -p ../dist/headers/node
           mkdir -p ../dist/headers/v8
           mkdir -p ../dist/headers/uv
-
-          find src -maxdepth 1 \
-            -type f \
-            -name '*.h' \
-            -exec cp {} ../dist/headers/node/ \;
-
+          
+          find src -maxdepth 1 -type f -name '*.h' -exec cp {} ../dist/headers/node/ \;
           cp -a deps/v8/include/. ../dist/headers/v8/
           cp -a deps/uv/include/. ../dist/headers/uv/
           cp out/config.gypi ../dist/headers/config.gypi
@@ -234,21 +160,11 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload diagnostic logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-${{ matrix.abi }}
-          path: logs/${{ matrix.abi }}/
-          if-no-files-found: warn
-          retention-days: 14
-
   package:
     name: Package RexChat
     needs: build
     if: needs.build.result == 'success'
     runs-on: ubuntu-24.04
-
     steps:
       - name: Download libraries
         uses: actions/download-artifact@v4
@@ -260,13 +176,9 @@ jobs:
       - name: Create ZIP
         run: |
           set -Eeuo pipefail
-
           mkdir -p RexChat-libnode
           cp -a merged/. RexChat-libnode/
-
-          zip -qr \
-            "RexChat-libnode-v${NODE_VERSION}.zip" \
-            RexChat-libnode
+          zip -qr "RexChat-libnode-v${NODE_VERSION}.zip" RexChat-libnode
 
       - name: Upload final ZIP
         uses: actions/upload-artifact@v4
