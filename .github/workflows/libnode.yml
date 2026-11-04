@@ -23,16 +23,22 @@ jobs:
           - abi: arm64-v8a
             dest_cpu: arm64
             arch: arm64
+            host_arch: x64
             toolchain_prefix: aarch64-linux-android
             expected_elf: AArch64
             ndk_libdir: aarch64-linux-android
+            host_cc: gcc
+            host_cxx: g++
 
           - abi: armeabi-v7a
             dest_cpu: arm
             arch: arm
+            host_arch: ia32
             toolchain_prefix: armv7a-linux-androideabi
             expected_elf: ARM
             ndk_libdir: arm-linux-androideabi
+            host_cc: "gcc -m32"
+            host_cxx: "g++ -m32"
 
     steps:
       - name: Checkout
@@ -42,13 +48,13 @@ jobs:
         run: |
           mkdir -p logs/${{ matrix.abi }} dist
           sudo apt-get update
-          sudo apt-get install -y python3 make g++ gcc
+          # Penambahan dukungan kompilator multilib untuk IA-32 host toolchain
+          sudo apt-get install -y python3 make gcc g++ gcc-multilib g++-multilib
 
       - name: Setup Android NDK
         id: ndk
         uses: nttld/setup-ndk@v1
         with:
-          # NDK r29 mutlak diperlukan agar C++20 std::atomic_ref tersedia di libc++
           ndk-version: r29
 
       - name: Download Node.js source
@@ -63,6 +69,22 @@ jobs:
           mkdir -p node-src
           tar -xJf "node-v${NODE_VERSION}.tar.xz" --strip-components=1 -C node-src
 
+      - name: Patch Node.js Source (CPU Features & Trap Handler)
+        working-directory: node-src
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          
+          # Menyalin NDK cpu-features ke deps/zlib agar build system menggunakan relative path (portable)
+          cp "$ANDROID_NDK_HOME/sources/android/cpufeatures/cpu-features.c" deps/zlib/
+          cp "$ANDROID_NDK_HOME/sources/android/cpufeatures/cpu-features.h" deps/zlib/
+          
+          # Menyuntikkan cpu-features.c ke dalam sumber kompilasi zlib.gyp
+          sed -i "s/'cpu_features.c',/'cpu_features.c', 'cpu-features.c',/g" deps/zlib/zlib.gyp
+          echo "deps/zlib/zlib.gyp patched successfully for CPU features"
+
       - name: Configure Node.js for Android
         working-directory: node-src
         env:
@@ -70,6 +92,9 @@ jobs:
           ANDROID_API: ${{ env.ANDROID_API }}
           ARCH: ${{ matrix.arch }}
           DEST_CPU: ${{ matrix.dest_cpu }}
+          HOST_ARCH: ${{ matrix.host_arch }}
+          HOST_CC: ${{ matrix.host_cc }}
+          HOST_CXX: ${{ matrix.host_cxx }}
           PREFIX: ${{ matrix.toolchain_prefix }}
         shell: bash
         run: |
@@ -80,21 +105,22 @@ jobs:
             echo "NDK: $ANDROID_NDK_HOME"
             TOOLCHAIN_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
             
-            # Targetkan Host compiler menggunakan environment bawaan runner
-            export CC_host=gcc
-            export CXX_host=g++
+            # Konfigurasi Multilib Host Compiler
+            export CC_host="$HOST_CC"
+            export CXX_host="$HOST_CXX"
             
-            # Setup toolchain murni Android
+            # Konfigurasi Android Target Compiler
             export CC="$TOOLCHAIN_BIN/${PREFIX}${ANDROID_API}-clang"
             export CXX="$TOOLCHAIN_BIN/${PREFIX}${ANDROID_API}-clang++"
             export AR="$TOOLCHAIN_BIN/llvm-ar"
             
-            # Mengunci C++20 dan menambahkan -latomic (wajib untuk 32-bit atomic support)
+            # C++20 dikunci, dan flag atomik (-latomic) dipertahankan
             export CFLAGS="-O3"
             export CXXFLAGS="-O3 -std=c++20"
             export LDFLAGS="-latomic"
             
-            export GYP_DEFINES="target_arch=$ARCH v8_target_arch=$ARCH android_target_arch=$ARCH host_os=linux OS=android android_ndk_path=$ANDROID_NDK_HOME"
+            # v8_enable_trap_handler=0 untuk mencegah pencarian header POSIX pada Android NDK
+            export GYP_DEFINES="target_arch=$ARCH host_arch=$HOST_ARCH v8_target_arch=$ARCH android_target_arch=$ARCH host_os=linux OS=android android_ndk_path=$ANDROID_NDK_HOME v8_enable_trap_handler=0"
             
             ./configure \
               --dest-cpu="$DEST_CPU" \
@@ -120,7 +146,6 @@ jobs:
           
           {
             echo "Starting make process..."
-            # -j2 menjaga kestabilan memori runner agar kompilasi V8 tidak mati (Killed)
             make -j2
             
             LLVM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
