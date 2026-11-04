@@ -38,11 +38,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Prepare environment
+        run: |
+          mkdir -p logs/${{ matrix.abi }} dist
+          sudo apt-get update
+          sudo apt-get install -y python3 make g++ gcc
+
       - name: Setup Android NDK
         id: ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r28
+          # NDK r29 mutlak diperlukan agar C++20 std::atomic_ref tersedia di libc++
+          ndk-version: r29
 
       - name: Download Node.js source
         shell: bash
@@ -56,18 +63,7 @@ jobs:
           mkdir -p node-src
           tar -xJf "node-v${NODE_VERSION}.tar.xz" --strip-components=1 -C node-src
 
-      - name: Patch Node.js for Android
-        working-directory: node-src
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          
-          # Terapkan patch bawaan (seperti trap-handler.h) jika tersedia
-          if [ -f "android_configure.py" ]; then
-            python3 android_configure.py patch || echo "No built-in python patches applied."
-          fi
-
-      - name: Configure Android
+      - name: Configure Node.js for Android
         working-directory: node-src
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
@@ -78,27 +74,37 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          LOG="$GITHUB_WORKSPACE/logs/${{ matrix.abi }}/configure.log"
           
-          echo "NDK: $ANDROID_NDK_HOME"
-          echo "Android API: $ANDROID_API"
-          echo "Architecture: $ARCH"
-          
-          TOOLCHAIN_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          
-          export CC="$TOOLCHAIN_BIN/${PREFIX}${ANDROID_API}-clang"
-          export CXX="$TOOLCHAIN_BIN/${PREFIX}${ANDROID_API}-clang++"
-          export AR="$TOOLCHAIN_BIN/llvm-ar"
-          
-          export GYP_DEFINES="target_arch=$ARCH v8_target_arch=$ARCH android_target_arch=$ARCH host_os=linux OS=android android_ndk_path=$ANDROID_NDK_HOME"
-          
-          ./configure \
-            --dest-cpu="$DEST_CPU" \
-            --dest-os=android \
-            --openssl-no-asm \
-            --cross-compiling \
-            --shared
+          {
+            echo "NDK: $ANDROID_NDK_HOME"
+            TOOLCHAIN_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
             
-          echo "Configuration successful"
+            # Targetkan Host compiler menggunakan environment bawaan runner
+            export CC_host=gcc
+            export CXX_host=g++
+            
+            # Setup toolchain murni Android
+            export CC="$TOOLCHAIN_BIN/${PREFIX}${ANDROID_API}-clang"
+            export CXX="$TOOLCHAIN_BIN/${PREFIX}${ANDROID_API}-clang++"
+            export AR="$TOOLCHAIN_BIN/llvm-ar"
+            
+            # Mengunci C++20 dan menambahkan -latomic (wajib untuk 32-bit atomic support)
+            export CFLAGS="-O3"
+            export CXXFLAGS="-O3 -std=c++20"
+            export LDFLAGS="-latomic"
+            
+            export GYP_DEFINES="target_arch=$ARCH v8_target_arch=$ARCH android_target_arch=$ARCH host_os=linux OS=android android_ndk_path=$ANDROID_NDK_HOME"
+            
+            ./configure \
+              --dest-cpu="$DEST_CPU" \
+              --dest-os=android \
+              --openssl-no-asm \
+              --cross-compiling \
+              --shared
+              
+            echo "Configuration successful"
+          } 2>&1 | tee -a "$LOG"
 
       - name: Compile libnode
         working-directory: node-src
@@ -110,30 +116,33 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          LOG="$GITHUB_WORKSPACE/logs/$ABI/compile.log"
           
-          # Gunakan -j2 untuk mencegah kehabisan RAM (OOM) pada runner GitHub
-          make -j2
-          
-          LLVM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          LIBNODE="$(find -L out -type f -name 'libnode.so' -print -quit)"
-          
-          if [ -z "$LIBNODE" ]; then
-            echo "Error: libnode.so not found!"
-            find out -iname '*libnode*' -print
-            exit 1
-          fi
-          
-          mkdir -p "../dist/$ABI"
-          cp "$LIBNODE" "../dist/$ABI/libnode.so"
-          
-          "$LLVM/llvm-strip" --strip-debug "../dist/$ABI/libnode.so"
-          "$LLVM/llvm-readelf" -h "../dist/$ABI/libnode.so" | grep -q "$EXPECTED_ELF"
-          
-          if "$LLVM/llvm-readelf" -d "../dist/$ABI/libnode.so" | grep -q 'libc++_shared.so'; then
-            cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/$NDK_LIBDIR/libc++_shared.so" "../dist/$ABI/"
-          fi
-          
-          echo "Library successfully collected"
+          {
+            echo "Starting make process..."
+            # -j2 menjaga kestabilan memori runner agar kompilasi V8 tidak mati (Killed)
+            make -j2
+            
+            LLVM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+            LIBNODE="$(find -L out -type f -name 'libnode.so' -print -quit)"
+            
+            if [ -z "$LIBNODE" ]; then
+              echo "Error: libnode.so not found!"
+              exit 1
+            fi
+            
+            mkdir -p "../dist/$ABI"
+            cp "$LIBNODE" "../dist/$ABI/libnode.so"
+            
+            "$LLVM/llvm-strip" --strip-debug "../dist/$ABI/libnode.so"
+            "$LLVM/llvm-readelf" -h "../dist/$ABI/libnode.so" | grep -q "$EXPECTED_ELF"
+            
+            if "$LLVM/llvm-readelf" -d "../dist/$ABI/libnode.so" | grep -q 'libc++_shared.so'; then
+              cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/$NDK_LIBDIR/libc++_shared.so" "../dist/$ABI/"
+            fi
+            
+            echo "Library successfully collected"
+          } 2>&1 | tee -a "$LOG"
 
       - name: Collect headers
         if: matrix.abi == 'arm64-v8a'
@@ -142,10 +151,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           
-          mkdir -p ../dist/headers/node
-          mkdir -p ../dist/headers/v8
-          mkdir -p ../dist/headers/uv
-          
+          mkdir -p ../dist/headers/node ../dist/headers/v8 ../dist/headers/uv
           find src -maxdepth 1 -type f -name '*.h' -exec cp {} ../dist/headers/node/ \;
           cp -a deps/v8/include/. ../dist/headers/v8/
           cp -a deps/uv/include/. ../dist/headers/uv/
@@ -159,6 +165,15 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ matrix.abi }}
+          path: logs/${{ matrix.abi }}/
+          if-no-files-found: warn
+          retention-days: 14
 
   package:
     name: Package RexChat
