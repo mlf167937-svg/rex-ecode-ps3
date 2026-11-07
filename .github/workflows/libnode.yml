@@ -1,53 +1,119 @@
-name: Build Libnode Android
+name: Build Libnode Android (Sequential)
 
 on:
   push:
     branches: [main, master]
+    paths:
+      - ".github/workflows/libnode.yml"
+      - "patches/**"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: libnode-android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "26.13.0"
+  ANDROID_API: "24"
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: "5G"
+  CCACHE_COMPILERCHECK: content
+
 jobs:
   build-android:
-    name: Build libnode.so (${{ matrix.abi }})
-    # Pin the runner image so ubuntu-latest migrations do not change the build environment.
+    name: Build ARM64 then ARM32
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            abi: arm64-v8a
-            target_host: aarch64-linux-android
-          - arch: arm
-            abi: armeabi-v7a
-            target_host: armv7a-linux-androideabi
+    timeout-minutes: 300
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install host dependencies
+      - name: Install build dependencies
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y ninja-build
+          sudo apt-get install -y --no-install-recommends ninja-build ccache
+          echo "=== Runner CPU ==="
+          nproc
+          echo "=== Runner memory ==="
+          free -h
+          grep MemTotal /proc/meminfo
 
-      - name: Download & Extract Node.js Source
+      - name: Restore compiler cache
+        uses: actions/cache@v5
+        with:
+          path: .ccache
+          key: ccache-${{ runner.os }}-android-node-${{ env.NODE_VERSION }}-${{ hashFiles('.github/workflows/libnode.yml') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-android-node-${{ env.NODE_VERSION }}-
+
+      - name: Prepare compiler cache
+        shell: bash
         run: |
           set -euo pipefail
-          curl -fsSLO https://nodejs.org/dist/v26.13.0/node-v26.13.0.tar.gz
-          tar -xzf node-v26.13.0.tar.gz
+          mkdir -p "$CCACHE_DIR"
+          ccache -M "$CCACHE_MAXSIZE"
+          ccache -z
 
-      - name: Patch zlib (android_getCpuFeatures)
+      - name: Download Node.js source once
+        shell: bash
         run: |
           set -euo pipefail
-          cat >> node-v26.13.0/deps/zlib/cpu_features.c <<'EOF'
+          curl -fsSLo "node-v${NODE_VERSION}.tar.gz" \
+            "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.gz"
+
+      - name: Build ARM64 first, then ARM32
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NDK="${ANDROID_NDK_LATEST_HOME:?Android NDK not found on runner}"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          JOBS="$(nproc)"
+          # Avoid overcommitting memory on hosted runners. This reports the
+          # available RAM and uses at most the runner's advertised CPU count.
+          MEM_KB="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
+          MEM_JOBS="$(( MEM_KB / 3500000 ))"
+          if (( MEM_JOBS < 1 )); then MEM_JOBS=1; fi
+          if (( JOBS > MEM_JOBS )); then JOBS="$MEM_JOBS"; fi
+
+          echo "Runner CPUs: $(nproc)"
+          echo "Available memory at start: $((MEM_KB / 1024)) MiB"
+          echo "Build parallelism: -j${JOBS}"
+          echo "NDK: $NDK"
+          echo "Compiler cache before build:"
+          ccache -s
+
+          mkdir -p output
+
+          build_abi() {
+            local ARCH="$1"
+            local ABI="$2"
+            local TARGET_HOST="$3"
+            local SOURCE_DIR="node-v${NODE_VERSION}-${ABI}"
+            local API="$ANDROID_API"
+
+            echo
+            echo "=================================================="
+            echo "Starting ${ABI} (${ARCH})"
+            echo "=================================================="
+
+            mkdir -p "$SOURCE_DIR"
+            tar -xzf "node-v${NODE_VERSION}.tar.gz" \
+              --strip-components=1 -C "$SOURCE_DIR"
+
+            # Apply the repository's Android zlib CPU feature workaround.
+            cat >> "$SOURCE_DIR/deps/zlib/cpu_features.c" <<'EOF'
 
           #if defined(__ANDROID__) && (defined(__aarch64__) || defined(__arm__))
           #include <sys/auxv.h>
@@ -68,80 +134,93 @@ jobs:
           #endif
           EOF
 
-      - name: Build libnode.so for ${{ matrix.abi }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd node-v26.13.0
+            (
+              cd "$SOURCE_DIR"
 
-          export NDK="${ANDROID_NDK_LATEST_HOME:?Android NDK was not found on this runner}"
-          export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
-          export API=24
+              export GYP_DEFINES="target_arch=${ARCH} v8_target_arch=${ARCH} android_target_arch=${ARCH} host_os=linux OS=android android_ndk_path=${NDK}"
 
-          # Compiler untuk host tools tetap native x86_64.
-          export GYP_DEFINES="OS=android host_os=linux android_ndk_path=$NDK"
-          export CC_host=gcc
-          export CXX_host=g++
-          export LINK_host=g++
-          export AR_host=ar
+              # Host build tools remain native x86_64 for BOTH Android targets.
+              export CC_host="$(command -v gcc)"
+              export CXX_host="$(command -v g++)"
+              export LINK_host="$(command -v g++)"
+              export AR_host="$(command -v ar)"
 
-          # Compiler untuk target Android berasal dari Android NDK.
-          export CC_target="$TOOLCHAIN/bin/${{ matrix.target_host }}${API}-clang"
-          export CXX_target="$TOOLCHAIN/bin/${{ matrix.target_host }}${API}-clang++"
-          export AR_target="$TOOLCHAIN/bin/llvm-ar"
-          export LINK_target="$CXX_target"
-          export CC="$CC_target"
-          export CXX="$CXX_target"
-          export AR="$AR_target"
-          export LINK="$LINK_target"
+              # Only target binaries use Android NDK cross-compilers.
+              export CC_target="ccache ${TOOLCHAIN}/bin/${TARGET_HOST}${API}-clang"
+              export CXX_target="ccache ${TOOLCHAIN}/bin/${TARGET_HOST}${API}-clang++"
+              export AR_target="${TOOLCHAIN}/bin/llvm-ar"
+              export LINK_target="$CXX_target"
+              export CC="$CC_target"
+              export CXX="$CXX_target"
+              export AR="$AR_target"
+              export LINK="$LINK_target"
 
-          ./configure \
-            --dest-cpu=${{ matrix.arch }} \
-            --dest-os=android \
-            --shared \
-            --without-intl \
-            --without-node-snapshot \
-            --without-node-code-cache \
-            --openssl-no-asm \
-            --cross-compiling
+              ./configure \
+                --dest-cpu="${ARCH}" \
+                --dest-os=android \
+                --shared \
+                --without-intl \
+                --without-node-snapshot \
+                --without-node-code-cache \
+                --openssl-no-asm \
+                --cross-compiling \
+                --v8-disable-temporal-support
 
-          # pipefail is important: without it, tee can hide a failed make command.
-          make -j"$(nproc)" 2>&1 | tee "../build-${{ matrix.abi }}.log"
+              make -j"${JOBS}" 2>&1 | tee "../build-${ABI}.log"
 
-          OUT_DIR="../output/${{ matrix.abi }}"
-          mkdir -p "$OUT_DIR"
+              local LIBNODE
+              LIBNODE="$(find out/Release -type f \( -name 'libnode.so' -o -name 'libnode.so.*' \) -print -quit)"
+              if [[ -z "$LIBNODE" ]]; then
+                echo "ERROR: libnode shared library missing for ${ABI}"
+                find out/Release -maxdepth 5 -type f -print 2>/dev/null | sort | tail -n 100 || true
+                exit 1
+              fi
 
-          # Node may suffix libnode with its module ABI version. Find either form,
-          # then publish a stable filename for Android packaging.
-          LIBNODE="$(find out/Release -type f \( -name 'libnode.so' -o -name 'libnode.so.*' \) -print -quit)"
-          if [[ -z "$LIBNODE" ]]; then
-            echo "ERROR: libnode shared library was not generated for ${{ matrix.abi }}."
-            echo "Build output files (last 100):"
-            find out/Release -maxdepth 5 -type f -print 2>/dev/null | sort | tail -n 100 || true
-            exit 1
-          fi
+              mkdir -p "../output/${ABI}"
+              cp -v "$LIBNODE" "../output/${ABI}/libnode.so"
+              test -s "../output/${ABI}/libnode.so"
+              file "../output/${ABI}/libnode.so"
+              "${TOOLCHAIN}/bin/llvm-readelf" -h "../output/${ABI}/libnode.so" | grep -E 'Class:|Machine:'
+            )
 
-          cp -v "$LIBNODE" "$OUT_DIR/libnode.so"
-          file "$OUT_DIR/libnode.so"
-          test -s "$OUT_DIR/libnode.so"
+            echo "Finished ${ABI}"
+            rm -rf "$SOURCE_DIR"
+            echo "Compiler cache after ${ABI}:"
+            ccache -s
+          }
 
-      - name: Show build errors on failure
+          # Deliberately sequential: ARM32 will not start until ARM64 succeeds.
+          build_abi "arm64" "arm64-v8a" "aarch64-linux-android"
+          build_abi "arm" "armeabi-v7a" "armv7a-linux-androideabi"
+
+          echo "Both ABI builds completed."
+          find output -type f -maxdepth 3 -print -exec ls -lh {} \;
+
+      - name: Show build diagnostics
         if: failure()
         shell: bash
         run: |
-          LOG="build-${{ matrix.abi }}.log"
-          if [[ -f "$LOG" ]]; then
-            grep -n -m 40 -E 'error:|Error [0-9]|FAILED:' "$LOG" || true
-            echo "--- Last 80 log lines ---"
-            tail -n 80 "$LOG"
-          else
-            echo "Build log not found: $LOG"
-          fi
+          for LOG in build-arm64-v8a.log build-armeabi-v7a.log; do
+            if [[ -f "$LOG" ]]; then
+              echo "===== $LOG: errors ====="
+              grep -n -m 40 -E 'error:|Error [0-9]|FAILED:' "$LOG" || true
+              echo "===== $LOG: last 80 lines ====="
+              tail -n 80 "$LOG"
+            fi
+          done
+          echo "=== Runner memory snapshot ==="
+          free -h || true
 
-      - name: Upload Artifact
+      - name: Show compiler cache statistics
+        if: always()
+        run: ccache -s || true
+
+      - name: Upload both Android libraries
         uses: actions/upload-artifact@v6
         with:
-          name: libnode-${{ matrix.abi }}
-          path: output/${{ matrix.abi }}/libnode.so
+          name: libnode-android-both
+          path: |
+            output/arm64-v8a/libnode.so
+            output/armeabi-v7a/libnode.so
           if-no-files-found: error
           retention-days: 7
