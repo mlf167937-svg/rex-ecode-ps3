@@ -2,9 +2,7 @@ name: Build Libnode Android
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
   workflow_dispatch:
 
 jobs:
@@ -18,9 +16,11 @@ jobs:
           - arch: arm64
             abi: arm64-v8a
             target_host: aarch64-linux-android
+            host_flags: ""
           - arch: arm
             abi: armeabi-v7a
             target_host: armv7a-linux-androideabi
+            host_flags: "-m32"
 
     steps:
       - name: Checkout Repository
@@ -31,45 +31,64 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build gcc-multilib g++-multilib
+
       - name: Download & Extract Node.js Source
         run: |
-          wget https://nodejs.org/dist/v26.13.0/node-v26.13.0.tar.gz
+          wget -q https://nodejs.org/dist/v26.13.0/node-v26.13.0.tar.gz
           tar -xzf node-v26.13.0.tar.gz
+
+      - name: Patch zlib (android_getCpuFeatures)
+        run: |
+          cat >> node-v26.13.0/deps/zlib/cpu_features.c <<'EOF'
+
+          #if defined(__ANDROID__) && (defined(__aarch64__) || defined(__arm__))
+          #include <sys/auxv.h>
+          #include <asm/hwcap.h>
+          uint64_t android_getCpuFeatures(void) {
+            uint64_t f = 0;
+          #if defined(__aarch64__)
+            unsigned long h = getauxval(AT_HWCAP);
+            if (h & HWCAP_CRC32) f |= ANDROID_CPU_ARM64_FEATURE_CRC32;
+            if (h & HWCAP_PMULL) f |= ANDROID_CPU_ARM64_FEATURE_PMULL;
+          #else
+            unsigned long h = getauxval(AT_HWCAP2);
+            if (h & HWCAP2_CRC32) f |= ANDROID_CPU_ARM_FEATURE_CRC32;
+            if (h & HWCAP2_PMULL) f |= ANDROID_CPU_ARM_FEATURE_PMULL;
+          #endif
+            return f;
+          }
+          #endif
+          EOF
 
       - name: Build libnode.so for ${{ matrix.abi }}
         run: |
           cd node-v26.13.0
-          
+
           export NDK=$ANDROID_NDK_LATEST_HOME
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export API=24
-          
-          # PERBAIKAN: Tambahkan host_os=linux dan OS=android
-          export ANDROID_NDK_PATH=$NDK
-          export android_ndk_path=$NDK
-          export GYP_DEFINES="android_ndk_path=$NDK host_os=linux OS=android"
-          
-          # 1. Gunakan GCC standar Linux untuk host tools (mksnapshot, dll)
-          export CC_host=gcc
-          export CXX_host=g++
-          export LINK_host=g++
-          
-          # 2. Gunakan Clang NDK untuk target Android
+          export GYP_DEFINES="OS=android android_ndk_path=$NDK"
+
+          # Host tools (mksnapshot, js2c, dll) memakai GCC Linux
+          export CC_host="gcc ${{ matrix.host_flags }}"
+          export CXX_host="g++ ${{ matrix.host_flags }}"
+          export LINK_host="g++ ${{ matrix.host_flags }}"
+          export AR_host=ar
+
+          # Target memakai Clang NDK
           export CC_target=$TOOLCHAIN/bin/${{ matrix.target_host }}${API}-clang
           export CXX_target=$TOOLCHAIN/bin/${{ matrix.target_host }}${API}-clang++
           export AR_target=$TOOLCHAIN/bin/llvm-ar
-          export LINK_target=$TOOLCHAIN/bin/${{ matrix.target_host }}${API}-clang++
-          
+          export LINK_target=$CXX_target
           export CC=$CC_target
           export CXX=$CXX_target
           export AR=$AR_target
           export LINK=$LINK_target
 
-          # PERBAIKAN: Bypass fungsi spesifik Android untuk modul zlib agar tidak terjadi error "undefined symbol"
-          export CFLAGS="$CFLAGS -DHAVE_ANDROID_GETCPUFEATURES=0"
-          export CXXFLAGS="$CXXFLAGS -DHAVE_ANDROID_GETCPUFEATURES=0"
-
-          # 3. Konfigurasi
           ./configure \
             --dest-cpu=${{ matrix.arch }} \
             --dest-os=android \
@@ -79,16 +98,20 @@ jobs:
             --without-node-code-cache \
             --openssl-no-asm \
             --cross-compiling
-            
-          # 4. Jalankan kompilasi (gunakan -j4)
-          make -j4
-          
-          # 5. Ekspor file output
+
+          make -j4 2>&1 | tee ../build.log
+
           mkdir -p ../output/${{ matrix.abi }}
-          find out/Release/ -maxdepth 2 -name "libnode.so" -exec cp {} ../output/${{ matrix.abi }}/ \;
+          find out/Release -name "libnode*.so*" -exec cp -v {} ../output/${{ matrix.abi }}/ \;
+          ls -la ../output/${{ matrix.abi }}
+
+      - name: Show first errors on failure
+        if: failure()
+        run: grep -n -m20 -E "error:|Error [0-9]" build.log || true
 
       - name: Upload Artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: libnode-${{ matrix.abi }}
-          path: output/${{ matrix.abi }}/libnode.so
+          path: output/${{ matrix.abi }}/
