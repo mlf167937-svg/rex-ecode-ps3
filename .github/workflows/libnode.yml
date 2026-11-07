@@ -44,14 +44,15 @@ jobs:
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export API=24
           
-          # PERBAIKAN: Beritahu GYP lokasi NDK yang spesifik
+          # PERBAIKAN: Tambahkan host_os=linux dan OS=android
           export ANDROID_NDK_PATH=$NDK
           export android_ndk_path=$NDK
-          export GYP_DEFINES="android_ndk_path=$NDK"
+          export GYP_DEFINES="android_ndk_path=$NDK host_os=linux OS=android"
           
           # 1. Gunakan GCC standar Linux untuk host tools (mksnapshot, dll)
           export CC_host=gcc
           export CXX_host=g++
+          export LINK_host=g++
           
           # 2. Gunakan Clang NDK untuk target Android
           export CC_target=$TOOLCHAIN/bin/${{ matrix.target_host }}${API}-clang
@@ -62,6 +63,7 @@ jobs:
           export CC=$CC_target
           export CXX=$CXX_target
           export AR=$AR_target
+          export LINK=$LINK_target
 
           # 3. Konfigurasi
           ./configure \
@@ -74,7 +76,7 @@ jobs:
             --openssl-no-asm \
             --cross-compiling
             
-          # 4. Jalankan kompilasi (gunakan -j4 agar tidak kehabisan RAM di Github)
+          # 4. Jalankan kompilasi (gunakan -j4)
           make -j4
           
           # 5. Ekspor file output
