@@ -1,229 +1,62 @@
-name: Build Android libnode
+name: Build Libnode Android
 
 on:
   push:
-
-permissions:
-  contents: read
-
-env:
-  NODE_VERSION: "26.13.0"
-  ANDROID_API: "24"
+    branches:
+      - main
+      - master
+  workflow_dispatch: # Tetap bisa dijalankan manual jika diperlukan
 
 jobs:
-  build:
-    name: Build ${{ matrix.abi }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-
+  build-android:
+    name: Build libnode.so (${{ matrix.arch }})
+    runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
       matrix:
         include:
-          - abi: arm64-v8a
-            dest_cpu: arm64
-            arch: arm64
-            host_arch: x64
-            toolchain_prefix: aarch64-linux-android
-            expected_elf: AArch64
-            ndk_libdir: aarch64-linux-android
-            host_cc: gcc
-            host_cxx: g++
-
-          - abi: armeabi-v7a
-            dest_cpu: arm
-            arch: arm
-            host_arch: ia32
-            toolchain_prefix: armv7a-linux-androideabi
-            expected_elf: ARM
-            ndk_libdir: arm-linux-androideabi
-            host_cc: "gcc -m32"
-            host_cxx: "g++ -m32"
+          - arch: arm64
+            abi: arm64-v8a
+          - arch: arm
+            abi: armeabi-v7a
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Prepare environment
-        run: |
-          mkdir -p logs/${{ matrix.abi }} dist
-          sudo apt-get update
-          # Penambahan dukungan kompilator multilib untuk IA-32 host toolchain
-          sudo apt-get install -y python3 make gcc g++ gcc-multilib g++-multilib
-
-      - name: Setup Android NDK
-        id: ndk
-        uses: nttld/setup-ndk@v1
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          ndk-version: r29
+          python-version: '3.x'
 
-      - name: Download Node.js source
-        shell: bash
+      - name: Download & Extract Node.js Source
         run: |
-          set -Eeuo pipefail
-          
-          curl -fL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.xz" -o "node-v${NODE_VERSION}.tar.xz"
-          curl -fL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o SHASUMS256.txt
-          grep " node-v${NODE_VERSION}.tar.xz$" SHASUMS256.txt | sha256sum -c -
-          
-          mkdir -p node-src
-          tar -xJf "node-v${NODE_VERSION}.tar.xz" --strip-components=1 -C node-src
+          wget https://nodejs.org/dist/v26.13.0/node-v26.13.0.tar.gz
+          tar -xzf node-v26.13.0.tar.gz
 
-      - name: Patch Node.js Source (CPU Features & Trap Handler)
-        working-directory: node-src
-        env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-        shell: bash
+      - name: Build libnode.so for ${{ matrix.abi }}
         run: |
-          set -Eeuo pipefail
+          cd node-v26.13.0
           
-          # Menyalin NDK cpu-features ke deps/zlib agar build system menggunakan relative path (portable)
-          cp "$ANDROID_NDK_HOME/sources/android/cpufeatures/cpu-features.c" deps/zlib/
-          cp "$ANDROID_NDK_HOME/sources/android/cpufeatures/cpu-features.h" deps/zlib/
+          # Gunakan Android NDK bawaan GitHub Runner
+          export ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME
           
-          # Menyuntikkan cpu-features.c ke dalam sumber kompilasi zlib.gyp
-          sed -i "s/'cpu_features.c',/'cpu_features.c', 'cpu-features.c',/g" deps/zlib/zlib.gyp
-          echo "deps/zlib/zlib.gyp patched successfully for CPU features"
+          ./configure \
+            --dest-cpu=${{ matrix.arch }} \
+            --dest-os=android \
+            --shared \
+            --openssl-no-asm \
+            --cross-compiling
+            
+          make -j$(nproc)
+          
+          # Buat folder output
+          mkdir -p ../output/${{ matrix.abi }}
+          
+          # Cari & copy libnode.so
+          find out/Release/ -name "libnode.so" -exec cp {} ../output/${{ matrix.abi }}/ \;
 
-      - name: Configure Node.js for Android
-        working-directory: node-src
-        env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-          ANDROID_API: ${{ env.ANDROID_API }}
-          ARCH: ${{ matrix.arch }}
-          DEST_CPU: ${{ matrix.dest_cpu }}
-          HOST_ARCH: ${{ matrix.host_arch }}
-          HOST_CC: ${{ matrix.host_cc }}
-          HOST_CXX: ${{ matrix.host_cxx }}
-          PREFIX: ${{ matrix.toolchain_prefix }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          LOG="$GITHUB_WORKSPACE/logs/${{ matrix.abi }}/configure.log"
-          
-          {
-            echo "NDK: $ANDROID_NDK_HOME"
-            TOOLCHAIN_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-            
-            # Konfigurasi Multilib Host Compiler
-            export CC_host="$HOST_CC"
-            export CXX_host="$HOST_CXX"
-            
-            # Konfigurasi Android Target Compiler
-            export CC="$TOOLCHAIN_BIN/${PREFIX}${ANDROID_API}-clang"
-            export CXX="$TOOLCHAIN_BIN/${PREFIX}${ANDROID_API}-clang++"
-            export AR="$TOOLCHAIN_BIN/llvm-ar"
-            
-            # C++20 dikunci, dan flag atomik (-latomic) dipertahankan
-            export CFLAGS="-O3"
-            export CXXFLAGS="-O3 -std=c++20"
-            export LDFLAGS="-latomic"
-            
-            # v8_enable_trap_handler=0 untuk mencegah pencarian header POSIX pada Android NDK
-            export GYP_DEFINES="target_arch=$ARCH host_arch=$HOST_ARCH v8_target_arch=$ARCH android_target_arch=$ARCH host_os=linux OS=android android_ndk_path=$ANDROID_NDK_HOME v8_enable_trap_handler=0"
-            
-            ./configure \
-              --dest-cpu="$DEST_CPU" \
-              --dest-os=android \
-              --openssl-no-asm \
-              --cross-compiling \
-              --shared
-              
-            echo "Configuration successful"
-          } 2>&1 | tee -a "$LOG"
-
-      - name: Compile libnode
-        working-directory: node-src
-        env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-          ABI: ${{ matrix.abi }}
-          EXPECTED_ELF: ${{ matrix.expected_elf }}
-          NDK_LIBDIR: ${{ matrix.ndk_libdir }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          LOG="$GITHUB_WORKSPACE/logs/$ABI/compile.log"
-          
-          {
-            echo "Starting make process..."
-            make -j2
-            
-            LLVM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-            LIBNODE="$(find -L out -type f -name 'libnode.so' -print -quit)"
-            
-            if [ -z "$LIBNODE" ]; then
-              echo "Error: libnode.so not found!"
-              exit 1
-            fi
-            
-            mkdir -p "../dist/$ABI"
-            cp "$LIBNODE" "../dist/$ABI/libnode.so"
-            
-            "$LLVM/llvm-strip" --strip-debug "../dist/$ABI/libnode.so"
-            "$LLVM/llvm-readelf" -h "../dist/$ABI/libnode.so" | grep -q "$EXPECTED_ELF"
-            
-            if "$LLVM/llvm-readelf" -d "../dist/$ABI/libnode.so" | grep -q 'libc++_shared.so'; then
-              cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/$NDK_LIBDIR/libc++_shared.so" "../dist/$ABI/"
-            fi
-            
-            echo "Library successfully collected"
-          } 2>&1 | tee -a "$LOG"
-
-      - name: Collect headers
-        if: matrix.abi == 'arm64-v8a'
-        working-directory: node-src
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          
-          mkdir -p ../dist/headers/node ../dist/headers/v8 ../dist/headers/uv
-          find src -maxdepth 1 -type f -name '*.h' -exec cp {} ../dist/headers/node/ \;
-          cp -a deps/v8/include/. ../dist/headers/v8/
-          cp -a deps/uv/include/. ../dist/headers/uv/
-          cp out/config.gypi ../dist/headers/config.gypi
-
-      - name: Upload libraries
-        if: success()
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: libnode-${{ matrix.abi }}
-          path: dist/
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload diagnostic logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-${{ matrix.abi }}
-          path: logs/${{ matrix.abi }}/
-          if-no-files-found: warn
-          retention-days: 14
-
-  package:
-    name: Package RexChat
-    needs: build
-    if: needs.build.result == 'success'
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Download libraries
-        uses: actions/download-artifact@v4
-        with:
-          pattern: libnode-*
-          path: merged
-          merge-multiple: true
-
-      - name: Create ZIP
-        run: |
-          set -Eeuo pipefail
-          mkdir -p RexChat-libnode
-          cp -a merged/. RexChat-libnode/
-          zip -qr "RexChat-libnode-v${NODE_VERSION}.zip" RexChat-libnode
-
-      - name: Upload final ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: RexChat-libnode-v${{ env.NODE_VERSION }}
-          path: RexChat-libnode-v${{ env.NODE_VERSION }}.zip
-          if-no-files-found: error
-          retention-days: 30
+          path: output/${{ matrix.abi }}/libnode.so
