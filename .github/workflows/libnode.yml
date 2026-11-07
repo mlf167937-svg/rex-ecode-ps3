@@ -5,19 +5,22 @@ on:
     branches:
       - main
       - master
-  workflow_dispatch: # Tetap bisa dijalankan manual jika diperlukan
+  workflow_dispatch:
 
 jobs:
   build-android:
-    name: Build libnode.so (${{ matrix.arch }})
+    name: Build libnode.so (${{ matrix.abi }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: arm64
             abi: arm64-v8a
+            target: aarch64-linux-android
           - arch: arm
             abi: armeabi-v7a
+            target: armv7a-linux-androideabi
 
     steps:
       - name: Checkout Repository
@@ -26,7 +29,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.11'
 
       - name: Download & Extract Node.js Source
         run: |
@@ -37,23 +40,39 @@ jobs:
         run: |
           cd node-v26.13.0
           
-          # Gunakan Android NDK bawaan GitHub Runner
-          export ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME
+          # Setup Environment Variables NDK
+          export NDK=$ANDROID_NDK_LATEST_HOME
+          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          export API=24
           
+          # Tentukan CC dan CXX spesifik arsitektur
+          if [ "${{ matrix.arch }}" = "arm" ]; then
+            export TARGET_HOST="armv7a-linux-androideabi"
+          else
+            export TARGET_HOST="aarch64-linux-android"
+          fi
+          
+          export CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
+          export CXX=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang++
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+          export STRIP=$TOOLCHAIN/bin/llvm-strip
+
+          # Configure Node.js dengan flag lintas kompilasi Android
           ./configure \
             --dest-cpu=${{ matrix.arch }} \
             --dest-os=android \
             --shared \
+            --without-intl \
             --openssl-no-asm \
             --cross-compiling
             
+          # Jalankan kompilasi
           make -j$(nproc)
           
-          # Buat folder output
+          # Pindahkan hasil build ke folder output
           mkdir -p ../output/${{ matrix.abi }}
-          
-          # Cari & copy libnode.so
-          find out/Release/ -name "libnode.so" -exec cp {} ../output/${{ matrix.abi }}/ \;
+          find out/Release/ -maxdepth 2 -name "libnode.so" -exec cp {} ../output/${{ matrix.abi }}/ \;
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
