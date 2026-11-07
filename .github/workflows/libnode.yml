@@ -65,6 +65,10 @@ jobs:
           export AR=$AR_target
           export LINK=$LINK_target
 
+          # PERBAIKAN: Bypass fungsi spesifik Android untuk modul zlib agar tidak terjadi error "undefined symbol"
+          export CFLAGS="$CFLAGS -DHAVE_ANDROID_GETCPUFEATURES=0"
+          export CXXFLAGS="$CXXFLAGS -DHAVE_ANDROID_GETCPUFEATURES=0"
+
           # 3. Konfigurasi
           ./configure \
             --dest-cpu=${{ matrix.arch }} \
