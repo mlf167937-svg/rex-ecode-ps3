@@ -44,7 +44,12 @@ jobs:
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export API=24
           
-          # 1. PENTING: Gunakan GCC standar Linux untuk host tools (mksnapshot, dll)
+          # PERBAIKAN: Beritahu GYP lokasi NDK yang spesifik
+          export ANDROID_NDK_PATH=$NDK
+          export android_ndk_path=$NDK
+          export GYP_DEFINES="android_ndk_path=$NDK"
+          
+          # 1. Gunakan GCC standar Linux untuk host tools (mksnapshot, dll)
           export CC_host=gcc
           export CXX_host=g++
           
@@ -58,7 +63,7 @@ jobs:
           export CXX=$CXX_target
           export AR=$AR_target
 
-          # 3. Konfigurasi dengan mematikan Node snapshot & code cache
+          # 3. Konfigurasi
           ./configure \
             --dest-cpu=${{ matrix.arch }} \
             --dest-os=android \
@@ -69,8 +74,8 @@ jobs:
             --openssl-no-asm \
             --cross-compiling
             
-          # 4. Jalankan kompilasi
-          make -j$(nproc)
+          # 4. Jalankan kompilasi (gunakan -j4 agar tidak kehabisan RAM di Github)
+          make -j4
           
           # 5. Ekspor file output
           mkdir -p ../output/${{ matrix.abi }}
