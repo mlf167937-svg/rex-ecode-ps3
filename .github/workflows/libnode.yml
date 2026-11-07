@@ -5,10 +5,14 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build-android:
     name: Build libnode.so (${{ matrix.abi }})
-    runs-on: ubuntu-latest
+    # Pin the runner image so ubuntu-latest migrations do not change the build environment.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -16,33 +20,33 @@ jobs:
           - arch: arm64
             abi: arm64-v8a
             target_host: aarch64-linux-android
-            host_flags: ""
           - arch: arm
             abi: armeabi-v7a
             target_host: armv7a-linux-androideabi
-            host_flags: "-m32"
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
       - name: Install host dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build gcc-multilib g++-multilib
+          sudo apt-get install -y ninja-build
 
       - name: Download & Extract Node.js Source
         run: |
-          wget -q https://nodejs.org/dist/v26.13.0/node-v26.13.0.tar.gz
+          set -euo pipefail
+          curl -fsSLO https://nodejs.org/dist/v26.13.0/node-v26.13.0.tar.gz
           tar -xzf node-v26.13.0.tar.gz
 
       - name: Patch zlib (android_getCpuFeatures)
         run: |
+          set -euo pipefail
           cat >> node-v26.13.0/deps/zlib/cpu_features.c <<'EOF'
 
           #if defined(__ANDROID__) && (defined(__aarch64__) || defined(__arm__))
@@ -65,31 +69,31 @@ jobs:
           EOF
 
       - name: Build libnode.so for ${{ matrix.abi }}
+        shell: bash
         run: |
+          set -euo pipefail
           cd node-v26.13.0
 
-          export NDK=$ANDROID_NDK_LATEST_HOME
-          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          export NDK="${ANDROID_NDK_LATEST_HOME:?Android NDK was not found on this runner}"
+          export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
           export API=24
 
-          # host_os wajib ada, kalau tidak GYP gagal di v8.gyp
+          # Compiler untuk host tools tetap native x86_64.
           export GYP_DEFINES="OS=android host_os=linux android_ndk_path=$NDK"
-
-          # Host tools memakai GCC Linux
-          export CC_host="gcc ${{ matrix.host_flags }}"
-          export CXX_host="g++ ${{ matrix.host_flags }}"
-          export LINK_host="g++ ${{ matrix.host_flags }}"
+          export CC_host=gcc
+          export CXX_host=g++
+          export LINK_host=g++
           export AR_host=ar
 
-          # Target memakai Clang NDK
-          export CC_target=$TOOLCHAIN/bin/${{ matrix.target_host }}${API}-clang
-          export CXX_target=$TOOLCHAIN/bin/${{ matrix.target_host }}${API}-clang++
-          export AR_target=$TOOLCHAIN/bin/llvm-ar
-          export LINK_target=$CXX_target
-          export CC=$CC_target
-          export CXX=$CXX_target
-          export AR=$AR_target
-          export LINK=$LINK_target
+          # Compiler untuk target Android berasal dari Android NDK.
+          export CC_target="$TOOLCHAIN/bin/${{ matrix.target_host }}${API}-clang"
+          export CXX_target="$TOOLCHAIN/bin/${{ matrix.target_host }}${API}-clang++"
+          export AR_target="$TOOLCHAIN/bin/llvm-ar"
+          export LINK_target="$CXX_target"
+          export CC="$CC_target"
+          export CXX="$CXX_target"
+          export AR="$AR_target"
+          export LINK="$LINK_target"
 
           ./configure \
             --dest-cpu=${{ matrix.arch }} \
@@ -101,19 +105,43 @@ jobs:
             --openssl-no-asm \
             --cross-compiling
 
-          make -j4 2>&1 | tee ../build.log
+          # pipefail is important: without it, tee can hide a failed make command.
+          make -j"$(nproc)" 2>&1 | tee "../build-${{ matrix.abi }}.log"
 
-          mkdir -p ../output/${{ matrix.abi }}
-          find out/Release -name "libnode*.so*" -exec cp -v {} ../output/${{ matrix.abi }}/ \;
-          ls -la ../output/${{ matrix.abi }}
+          OUT_DIR="../output/${{ matrix.abi }}"
+          mkdir -p "$OUT_DIR"
 
-      - name: Show first errors on failure
+          # Node may suffix libnode with its module ABI version. Find either form,
+          # then publish a stable filename for Android packaging.
+          LIBNODE="$(find out/Release -type f \( -name 'libnode.so' -o -name 'libnode.so.*' \) -print -quit)"
+          if [[ -z "$LIBNODE" ]]; then
+            echo "ERROR: libnode shared library was not generated for ${{ matrix.abi }}."
+            echo "Build output files (last 100):"
+            find out/Release -maxdepth 5 -type f -print 2>/dev/null | sort | tail -n 100 || true
+            exit 1
+          fi
+
+          cp -v "$LIBNODE" "$OUT_DIR/libnode.so"
+          file "$OUT_DIR/libnode.so"
+          test -s "$OUT_DIR/libnode.so"
+
+      - name: Show build errors on failure
         if: failure()
-        run: grep -n -m20 -E "error:|Error [0-9]" build.log || true
+        shell: bash
+        run: |
+          LOG="build-${{ matrix.abi }}.log"
+          if [[ -f "$LOG" ]]; then
+            grep -n -m 40 -E 'error:|Error [0-9]|FAILED:' "$LOG" || true
+            echo "--- Last 80 log lines ---"
+            tail -n 80 "$LOG"
+          else
+            echo "Build log not found: $LOG"
+          fi
 
       - name: Upload Artifact
-        if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: libnode-${{ matrix.abi }}
-          path: output/${{ matrix.abi }}/
+          path: output/${{ matrix.abi }}/libnode.so
+          if-no-files-found: error
+          retention-days: 7
