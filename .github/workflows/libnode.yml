@@ -71,9 +71,11 @@ jobs:
           export NDK=$ANDROID_NDK_LATEST_HOME
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export API=24
-          export GYP_DEFINES="OS=android android_ndk_path=$NDK"
 
-          # Host tools (mksnapshot, js2c, dll) memakai GCC Linux
+          # host_os wajib ada, kalau tidak GYP gagal di v8.gyp
+          export GYP_DEFINES="OS=android host_os=linux android_ndk_path=$NDK"
+
+          # Host tools memakai GCC Linux
           export CC_host="gcc ${{ matrix.host_flags }}"
           export CXX_host="g++ ${{ matrix.host_flags }}"
           export LINK_host="g++ ${{ matrix.host_flags }}"
