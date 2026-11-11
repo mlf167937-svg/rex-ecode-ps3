@@ -1,58 +1,54 @@
-name: Download, Zip, and Upload Artifact
+name: MediaFire Download via Puppeteer
 
 on:
   push:
-    branches:
-      - main
-      - master
-  workflow_dispatch:  # tetap bisa dijalankan manual
+    branches: [main]
 
 jobs:
-  download-and-zip:
+  download:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 jam, batas maksimum GitHub Actions
+    timeout-minutes: 360
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install 7-Zip
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y p7zip-full
-
-      - name: Download file from MediaFire
-        run: |
-          URL="https://www.mediafire.com/file_premium/3nr4ucevosspsgn/NARUTO_PS3_MODPACK_PART_3.pkg?action=check&dkey=rf18dwdun0w&r=898"
-          echo "Mencoba mengunduh dari: $URL"
-          curl -L -f --retry 3 --retry-delay 5 \
-            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36" \
-            -o "NARUTO_PS3_MODPACK_PART_3.pkg" \
-            "$URL" \
-            || { echo "❌ Download gagal (kemungkinan 403 / butuh login MediaFire)"; exit 1; }
-
-      - name: Verify downloaded file
-        run: |
-          ls -lh NARUTO_PS3_MODPACK_PART_3.pkg
-          file NARUTO_PS3_MODPACK_PART_3.pkg
-          # Pastikan bukan halaman HTML error
-          if file NARUTO_PS3_MODPACK_PART_3.pkg | grep -qi "HTML"; then
-            echo "❌ File yang diunduh adalah HTML (bukan .pkg). URL tidak valid / butuh autentikasi."
-            exit 1
-          fi
-
-      - name: Zip with ultra compression
-        run: |
-          7z a -tzip -mx=9 -mmt=on \
-            "NARUTO_PS3_MODPACK_PART_3.zip" \
-            "NARUTO_PS3_MODPACK_PART_3.pkg"
-          ls -lh NARUTO_PS3_MODPACK_PART_3.zip
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          name: NARUTO_PS3_MODPACK_PART_3_zip
-          path: NARUTO_PS3_MODPACK_PART_3.zip
-          retention-days: 7
-          if-no-files-found: error
-          compression-level: 0  # sudah di-zip manual, jangan kompres lagi
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          npm init -y
+          npm install puppeteer
+
+      - name: Get direct link with Puppeteer
+        run: |
+          node -e "
+          const puppeteer = require('puppeteer');
+          (async () => {
+            const browser = await puppeteer.launch({ headless: 'new' });
+            const page = await browser.newPage();
+            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+            await page.goto('https://www.mediafire.com/file_premium/3nr4ucevosspsgn/NARUTO_PS3_MODPACK_PART_3.pkg', { waitUntil: 'networkidle2', timeout: 120000 });
+            // Tunggu dan ambil link unduhan, selector perlu disesuaikan dengan halaman aktual
+            await page.waitForSelector('a#downloadButton', { timeout: 120000 });
+            const link = await page.\$eval('a#downloadButton', el => el.href);
+            console.log('DIRECT_LINK=' + link);
+            await browser.close();
+          })();
+          " > link.txt
+
+      - name: Extract link and download
+        run: |
+          DIRECT_LINK=$(grep 'DIRECT_LINK=' link.txt | cut -d'=' -f2-)
+          curl -L -o file.pkg "$DIRECT_LINK"
+
+      - name: Zip and upload
+        run: |
+          sudo apt-get install -y p7zip-full
+          7z a -tzip -mx=9 file.zip file.pkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mediafire-zip
+          path: file.zip
