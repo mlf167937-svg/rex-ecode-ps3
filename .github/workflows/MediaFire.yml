@@ -1,54 +1,116 @@
-name: MediaFire Download via Puppeteer
+name: Download ZUKO3H Modpack, Zip Medium, Upload Artifact
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - master
+  workflow_dispatch:
 
 jobs:
-  download:
+  download-and-zip:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install dependencies
+      - name: Install system dependencies for Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 libx11-xcb1 libxcb-dri3-0 libdrm2 libgbm1 \
+            libasound2t64 p7zip-full
+
+      - name: Install Puppeteer
         run: |
           npm init -y
           npm install puppeteer
 
-      - name: Get direct link with Puppeteer
+      - name: Get direct download link with Puppeteer
         run: |
-          node -e "
+          cat > get-link.js << 'EOF'
           const puppeteer = require('puppeteer');
+          const fs = require('fs');
+
           (async () => {
-            const browser = await puppeteer.launch({ headless: 'new' });
-            const page = await browser.newPage();
-            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-            await page.goto('https://www.mediafire.com/file_premium/3nr4ucevosspsgn/NARUTO_PS3_MODPACK_PART_3.pkg', { waitUntil: 'networkidle2', timeout: 120000 });
-            // Tunggu dan ambil link unduhan, selector perlu disesuaikan dengan halaman aktual
-            await page.waitForSelector('a#downloadButton', { timeout: 120000 });
-            const link = await page.\$eval('a#downloadButton', el => el.href);
-            console.log('DIRECT_LINK=' + link);
-            await browser.close();
-          })();
-          " > link.txt
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu'
+              ]
+            });
 
-      - name: Extract link and download
-        run: |
-          DIRECT_LINK=$(grep 'DIRECT_LINK=' link.txt | cut -d'=' -f2-)
-          curl -L -o file.pkg "$DIRECT_LINK"
+            try {
+              const page = await browser.newPage();
+              await page.setUserAgent(
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+              );
 
-      - name: Zip and upload
+              const url = 'https://www.mediafire.com/file_premium/p94ug5cc2rt30iw/ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg';
+              console.log('Membuka:', url);
+
+              await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
+
+              await page.waitForSelector('a#downloadButton', { timeout: 120000 });
+
+              const directLink = await page.$eval('a#downloadButton', el => el.href);
+              console.log('Direct link:', directLink);
+
+              if (!directLink || !directLink.startsWith('http')) {
+                throw new Error('Link download tidak valid: ' + directLink);
+              }
+
+              fs.writeFileSync('direct_link.txt', directLink);
+            } finally {
+              await browser.close();
+            }
+          })().catch(err => {
+            console.error('Gagal mendapatkan link:', err.message);
+            process.exit(1);
+          });
+          EOF
+          node get-link.js
+
+      - name: Download file with curl
         run: |
-          sudo apt-get install -y p7zip-full
-          7z a -tzip -mx=9 file.zip file.pkg
-      - uses: actions/upload-artifact@v4
+          DIRECT_LINK=$(cat direct_link.txt)
+          echo "Mengunduh dari: $DIRECT_LINK"
+          curl -L --retry 3 --retry-delay 5 \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            -o "ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg" \
+            "$DIRECT_LINK"
+
+      - name: Verify downloaded file
+        run: |
+          ls -lh ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg
+          file ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg
+          if file ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg | grep -qi "HTML"; then
+            echo "❌ File yang diunduh adalah HTML, bukan .pkg"
+            exit 1
+          fi
+
+      - name: Zip with medium compression
+        run: |
+          7z a -tzip -mx=2 -mmt=on \
+            "ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.zip" \
+            "ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg"
+          ls -lh ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: mediafire-zip
-          path: file.zip
+          name: ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4_zip
+          path: ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.zip
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
