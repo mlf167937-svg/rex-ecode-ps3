@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-name: Download ZUKO3H Modpack, Zip Medium, Upload Artifact
-=======
-name: Download MediaFire, Zip, Upload Artifact
->>>>>>> branch 'main' of https://github.com/mlf167937-svg/rex-ecode-ps3.git
+name: Download MediaFire PKG, Split 500MB, Upload Parts
 
 on:
   push:
@@ -11,8 +7,17 @@ on:
       - master
   workflow_dispatch:
 
+env:
+  # ====== GANTI DI SINI ======
+  MEDIAFIRE_URL: 'https://www.mediafire.com/file_premium/p94ug5cc2rt30iw/ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg'
+  BASE_NAME: 'ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4'
+  PART_SIZE: '500M'
+  # Jumlah part: 7GB / 500MB ≈ 15. Set lebih longgar supaya aman.
+  TOTAL_PARTS: 20
+  # ===========================
+
 jobs:
-  download-and-zip:
+  download-and-split:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -25,7 +30,7 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install system dependencies for Chrome
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -38,12 +43,17 @@ jobs:
           npm install puppeteer
 
       - name: Get direct download link with Puppeteer
+        env:
+          MF_URL: ${{ env.MEDIAFIRE_URL }}
         run: |
           cat > get-link.js << 'EOF'
           const puppeteer = require('puppeteer');
           const fs = require('fs');
 
           (async () => {
+            const url = process.env.MF_URL;
+            console.log('Membuka:', url);
+
             const browser = await puppeteer.launch({
               headless: 'new',
               args: [
@@ -60,23 +70,17 @@ jobs:
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
               );
 
-<<<<<<< HEAD
-              const url = 'https://www.mediafire.com/file_premium/p94ug5cc2rt30iw/ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg';
-              console.log('Membuka:', url);
-
               await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
 
-=======
-              const url = 'https://www.mediafire.com/file_premium/3nr4ucevosspsgn/NARUTO_PS3_MODPACK_PART_3.pkg';
-              console.log('Membuka:', url);
-
-              await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
-
-              // Tunggu tombol download muncul (selector MediaFire saat ini: #downloadButton)
->>>>>>> branch 'main' of https://github.com/mlf167937-svg/rex-ecode-ps3.git
+              // Tunggu tombol download, tapi jangan strict visible (kadang tertutup overlay)
               await page.waitForSelector('a#downloadButton', { timeout: 120000 });
 
-              const directLink = await page.$eval('a#downloadButton', el => el.href);
+              // Ambil href langsung dari DOM (lebih tahan banting daripada click)
+              const directLink = await page.evaluate(() => {
+                const btn = document.querySelector('a#downloadButton');
+                return btn ? btn.href : null;
+              });
+
               console.log('Direct link:', directLink);
 
               if (!directLink || !directLink.startsWith('http')) {
@@ -94,65 +98,98 @@ jobs:
           EOF
           node get-link.js
 
-      - name: Download file with curl
+      - name: Download full PKG with curl
         run: |
           DIRECT_LINK=$(cat direct_link.txt)
           echo "Mengunduh dari: $DIRECT_LINK"
           curl -L --retry 3 --retry-delay 5 \
+            --fail \
             -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-<<<<<<< HEAD
-            -o "ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg" \
+            -o "full.pkg" \
             "$DIRECT_LINK"
 
       - name: Verify downloaded file
         run: |
-          ls -lh ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg
-          file ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg
-          if file ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg | grep -qi "HTML"; then
+          ls -lh full.pkg
+          file full.pkg
+          if file full.pkg | grep -qi "HTML"; then
             echo "❌ File yang diunduh adalah HTML, bukan .pkg"
             exit 1
           fi
-
-      - name: Zip with medium compression
-        run: |
-          7z a -tzip -mx=2 -mmt=on \
-            "ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.zip" \
-            "ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg"
-          ls -lh ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.zip
-=======
-            -o "NARUTO_PS3_MODPACK_PART_3.pkg" \
-            "$DIRECT_LINK"
-
-      - name: Verify downloaded file
-        run: |
-          ls -lh NARUTO_PS3_MODPACK_PART_3.pkg
-          file NARUTO_PS3_MODPACK_PART_3.pkg
-          if file NARUTO_PS3_MODPACK_PART_3.pkg | grep -qi "HTML"; then
-            echo "❌ File yang diunduh adalah HTML, bukan .pkg"
+          SIZE=$(stat -c%s full.pkg)
+          echo "Ukuran: $SIZE bytes"
+          if [ "$SIZE" -lt 100000000 ]; then
+            echo "❌ File terlalu kecil, kemungkinan gagal download"
             exit 1
           fi
 
-      - name: Zip with ultra compression
+      - name: Split into 500MB parts
         run: |
-          7z a -tzip -mx=9 -mmt=on \
-            "NARUTO_PS3_MODPACK_PART_3.zip" \
-            "NARUTO_PS3_MODPACK_PART_3.pkg"
-          ls -lh NARUTO_PS3_MODPACK_PART_3.zip
->>>>>>> branch 'main' of https://github.com/mlf167937-svg/rex-ecode-ps3.git
+          mkdir -p parts
+          split -b ${{ env.PART_SIZE }} -d -a 3 full.pkg parts/${BASE_NAME}.part
+          cd parts
+          ls -lh
+          echo "Jumlah part: $(ls | wc -l)"
 
-      - name: Upload artifact
+      - name: Compress parts folder for transfer
+        run: |
+          # Tidak dikompres lagi (sudah pkg), hanya dikemas agar bisa dipindah antar job
+          cd parts
+          tar -cf ../parts.tar .
+          cd ..
+          ls -lh parts.tar
+
+      - name: Upload parts bundle (temporary, untuk matrix job)
         uses: actions/upload-artifact@v4
         with:
-<<<<<<< HEAD
-          name: ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4_zip
-          path: ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.zip
+          name: parts-bundle
+          path: parts.tar
+          retention-days: 1
+          compression-level: 0
+
+  upload-each-part:
+    needs: download-and-split
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
+
+    steps:
+      - name: Download parts bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: parts-bundle
+          path: .
+
+      - name: Extract parts
+        run: |
+          mkdir -p parts
+          tar -xf parts.tar -C parts
+          ls -lh parts
+
+      - name: Pick part file for this matrix index
+        id: pick
+        run: |
+          PART_NUM=$(printf "%03d" ${{ matrix.part }})
+          FILE="parts/${{ env.BASE_NAME }}.part${PART_NUM}"
+          if [ -f "$FILE" ]; then
+            echo "file=$FILE" >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+            ls -lh "$FILE"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "Part $PART_NUM tidak ada (mungkin jumlah part lebih sedikit)"
+          fi
+
+      - name: Upload this part as artifact
+        if: steps.pick.outputs.found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BASE_NAME }}_part${{ matrix.part }}
+          path: ${{ steps.pick.outputs.file }}
           retention-days: 7
           if-no-files-found: error
           compression-level: 0
-=======
-          name: NARUTO_PS3_MODPACK_PART_3_zip
-          path: NARUTO_PS3_MODPACK_PART_3.zip
-          retention-days: 7
-          if-no-files-found: error
-          compression-level: 0
->>>>>>> branch 'main' of https://github.com/mlf167937-svg/rex-ecode-ps3.git
