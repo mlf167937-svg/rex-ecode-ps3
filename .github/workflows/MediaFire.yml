@@ -1,4 +1,4 @@
-name: Download MediaFire PKG, Split 500MB, Upload Parts
+name: Download MediaFire via FlareSolverr, Split, Upload
 
 on:
   push:
@@ -8,13 +8,10 @@ on:
   workflow_dispatch:
 
 env:
-  # ====== GANTI DI SINI ======
   MEDIAFIRE_URL: 'https://www.mediafire.com/file_premium/p94ug5cc2rt30iw/ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg'
   BASE_NAME: 'ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4'
   PART_SIZE: '500M'
-  # Jumlah part: 7GB / 500MB ≈ 15. Set lebih longgar supaya aman.
   TOTAL_PARTS: 20
-  # ===========================
 
 jobs:
   download-and-split:
@@ -22,124 +19,97 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install system dependencies
+      - name: Start FlareSolverr
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libnss3 libx11-xcb1 libxcb-dri3-0 libdrm2 libgbm1 \
-            libasound2t64 p7zip-full
+          docker run -d --name flaresolverr -p 8191:8191 \
+            -e LOG_LEVEL=info \
+            ghcr.io/flaresolverr/flaresolverr:latest
+          for i in $(seq 1 30); do
+            if curl -s http://localhost:8191/v1 > /dev/null 2>&1; then
+              echo "FlareSolverr ready"
+              break
+            fi
+            echo "Waiting for FlareSolverr... ($i)"
+            sleep 2
+          done
 
-      - name: Install Puppeteer
+      - name: Get direct link via FlareSolverr
         run: |
-          npm init -y
-          npm install puppeteer
-
-      - name: Get direct download link with Puppeteer
-        env:
-          MF_URL: ${{ env.MEDIAFIRE_URL }}
-        run: |
-          cat > get-link.js << 'EOF'
-          const puppeteer = require('puppeteer');
+          cat > solve.js << 'EOF'
           const fs = require('fs');
 
           (async () => {
-            const url = process.env.MF_URL;
-            console.log('Membuka:', url);
+            const url = process.env.MEDIAFIRE_URL;
+            const body = {
+              cmd: 'request.get',
+              url: url,
+              maxTimeout: 120000
+            };
 
-            const browser = await puppeteer.launch({
-              headless: 'new',
-              args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu'
-              ]
+            const resp = await fetch('http://localhost:8191/v1', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body)
             });
 
-            try {
-              const page = await browser.newPage();
-              await page.setUserAgent(
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-              );
+            const data = await resp.json();
+            console.log('Status:', data.status);
 
-              await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
-
-              // Tunggu tombol download, tapi jangan strict visible (kadang tertutup overlay)
-              await page.waitForSelector('a#downloadButton', { timeout: 120000 });
-
-              // Ambil href langsung dari DOM (lebih tahan banting daripada click)
-              const directLink = await page.evaluate(() => {
-                const btn = document.querySelector('a#downloadButton');
-                return btn ? btn.href : null;
-              });
-
-              console.log('Direct link:', directLink);
-
-              if (!directLink || !directLink.startsWith('http')) {
-                throw new Error('Link download tidak valid: ' + directLink);
-              }
-
-              fs.writeFileSync('direct_link.txt', directLink);
-            } finally {
-              await browser.close();
+            if (data.status !== 'ok') {
+              throw new Error('FlareSolverr gagal: ' + JSON.stringify(data.message));
             }
+
+            const html = data.solution.response;
+            const match = html.match(/id="downloadButton"[^>]*href="([^"]+)"/);
+            if (!match) {
+              const match2 = html.match(/href="(https:\/\/download[^"]+)"/);
+              if (!match2) {
+                fs.writeFileSync('debug.html', html);
+                throw new Error('Tombol download tidak ditemukan di HTML');
+              }
+              fs.writeFileSync('direct_link.txt', match2[1]);
+              console.log('Direct link:', match2[1]);
+              return;
+            }
+
+            fs.writeFileSync('direct_link.txt', match[1]);
+            console.log('Direct link:', match[1]);
           })().catch(err => {
-            console.error('Gagal mendapatkan link:', err.message);
+            console.error('Error:', err.message);
             process.exit(1);
           });
           EOF
-          node get-link.js
+          node solve.js
 
-      - name: Download full PKG with curl
+      - name: Download file
         run: |
           DIRECT_LINK=$(cat direct_link.txt)
-          echo "Mengunduh dari: $DIRECT_LINK"
+          echo "Downloading from: $DIRECT_LINK"
           curl -L --retry 3 --retry-delay 5 \
-            --fail \
             -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
             -o "full.pkg" \
             "$DIRECT_LINK"
-
-      - name: Verify downloaded file
-        run: |
           ls -lh full.pkg
-          file full.pkg
           if file full.pkg | grep -qi "HTML"; then
-            echo "❌ File yang diunduh adalah HTML, bukan .pkg"
-            exit 1
-          fi
-          SIZE=$(stat -c%s full.pkg)
-          echo "Ukuran: $SIZE bytes"
-          if [ "$SIZE" -lt 100000000 ]; then
-            echo "❌ File terlalu kecil, kemungkinan gagal download"
+            echo "File HTML, gagal download"
             exit 1
           fi
 
-      - name: Split into 500MB parts
+      - name: Split 500MB
         run: |
           mkdir -p parts
-          split -b ${{ env.PART_SIZE }} -d -a 3 full.pkg parts/${BASE_NAME}.part
-          cd parts
-          ls -lh
-          echo "Jumlah part: $(ls | wc -l)"
+          split -b ${PART_SIZE} -d -a 3 full.pkg parts/${BASE_NAME}.part
+          ls -lh parts/
 
-      - name: Compress parts folder for transfer
+      - name: Bundle parts
         run: |
-          # Tidak dikompres lagi (sudah pkg), hanya dikemas agar bisa dipindah antar job
-          cd parts
-          tar -cf ../parts.tar .
-          cd ..
+          tar -cf parts.tar -C parts .
           ls -lh parts.tar
 
-      - name: Upload parts bundle (temporary, untuk matrix job)
+      - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
           name: parts-bundle
@@ -147,49 +117,42 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-  upload-each-part:
+  upload-parts:
     needs: download-and-split
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-
     strategy:
+      max-parallel: 3
       fail-fast: false
       matrix:
         part: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
 
     steps:
-      - name: Download parts bundle
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: parts-bundle
-          path: .
 
-      - name: Extract parts
+      - name: Extract
         run: |
           mkdir -p parts
           tar -xf parts.tar -C parts
-          ls -lh parts
 
-      - name: Pick part file for this matrix index
+      - name: Pick part
         id: pick
         run: |
           PART_NUM=$(printf "%03d" ${{ matrix.part }})
-          FILE="parts/${{ env.BASE_NAME }}.part${PART_NUM}"
+          FILE="parts/${BASE_NAME}.part${PART_NUM}"
           if [ -f "$FILE" ]; then
             echo "file=$FILE" >> $GITHUB_OUTPUT
             echo "found=true" >> $GITHUB_OUTPUT
-            ls -lh "$FILE"
           else
             echo "found=false" >> $GITHUB_OUTPUT
-            echo "Part $PART_NUM tidak ada (mungkin jumlah part lebih sedikit)"
           fi
 
-      - name: Upload this part as artifact
+      - name: Upload part
         if: steps.pick.outputs.found == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BASE_NAME }}_part${{ matrix.part }}
           path: ${{ steps.pick.outputs.file }}
           retention-days: 7
-          if-no-files-found: error
           compression-level: 0
