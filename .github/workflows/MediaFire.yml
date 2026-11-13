@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 name: Download ZUKO3H Modpack, Zip Medium, Upload Artifact
+=======
+name: Download MediaFire, Zip, Upload Artifact
+>>>>>>> branch 'main' of https://github.com/mlf167937-svg/rex-ecode-ps3.git
 
 on:
   push:
@@ -56,11 +60,20 @@ jobs:
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
               );
 
+<<<<<<< HEAD
               const url = 'https://www.mediafire.com/file_premium/p94ug5cc2rt30iw/ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg';
               console.log('Membuka:', url);
 
               await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
 
+=======
+              const url = 'https://www.mediafire.com/file_premium/3nr4ucevosspsgn/NARUTO_PS3_MODPACK_PART_3.pkg';
+              console.log('Membuka:', url);
+
+              await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
+
+              // Tunggu tombol download muncul (selector MediaFire saat ini: #downloadButton)
+>>>>>>> branch 'main' of https://github.com/mlf167937-svg/rex-ecode-ps3.git
               await page.waitForSelector('a#downloadButton', { timeout: 120000 });
 
               const directLink = await page.$eval('a#downloadButton', el => el.href);
@@ -87,6 +100,7 @@ jobs:
           echo "Mengunduh dari: $DIRECT_LINK"
           curl -L --retry 3 --retry-delay 5 \
             -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+<<<<<<< HEAD
             -o "ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg" \
             "$DIRECT_LINK"
 
@@ -105,12 +119,40 @@ jobs:
             "ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.zip" \
             "ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg"
           ls -lh ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.zip
+=======
+            -o "NARUTO_PS3_MODPACK_PART_3.pkg" \
+            "$DIRECT_LINK"
+
+      - name: Verify downloaded file
+        run: |
+          ls -lh NARUTO_PS3_MODPACK_PART_3.pkg
+          file NARUTO_PS3_MODPACK_PART_3.pkg
+          if file NARUTO_PS3_MODPACK_PART_3.pkg | grep -qi "HTML"; then
+            echo "❌ File yang diunduh adalah HTML, bukan .pkg"
+            exit 1
+          fi
+
+      - name: Zip with ultra compression
+        run: |
+          7z a -tzip -mx=9 -mmt=on \
+            "NARUTO_PS3_MODPACK_PART_3.zip" \
+            "NARUTO_PS3_MODPACK_PART_3.pkg"
+          ls -lh NARUTO_PS3_MODPACK_PART_3.zip
+>>>>>>> branch 'main' of https://github.com/mlf167937-svg/rex-ecode-ps3.git
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
+<<<<<<< HEAD
           name: ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4_zip
           path: ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.zip
           retention-days: 7
           if-no-files-found: error
           compression-level: 0
+=======
+          name: NARUTO_PS3_MODPACK_PART_3_zip
+          path: NARUTO_PS3_MODPACK_PART_3.zip
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+>>>>>>> branch 'main' of https://github.com/mlf167937-svg/rex-ecode-ps3.git
