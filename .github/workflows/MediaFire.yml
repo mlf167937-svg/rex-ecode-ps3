@@ -1,4 +1,4 @@
-name: Download MediaFire via FlareSolverr, Split, Upload
+name: Download MediaFire PKG, Split 4 Rata, Upload
 
 on:
   push:
@@ -8,10 +8,9 @@ on:
   workflow_dispatch:
 
 env:
-  MEDIAFIRE_URL: 'https://www.mediafire.com/file_premium/p94ug5cc2rt30iw/ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg'
-  BASE_NAME: 'ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4'
-  PART_SIZE: '500M'
-  TOTAL_PARTS: 20
+  MEDIAFIRE_URL: 'https://www.mediafire.com/file_premium/3nr4ucevosspsgn/NARUTO_PS3_MODPACK_PART_3.pkg'
+  BASE_NAME: 'NARUTO_PS3_MODPACK_PART_3'
+  NUM_PARTS: 4
 
 jobs:
   download-and-split:
@@ -98,11 +97,19 @@ jobs:
             exit 1
           fi
 
-      - name: Split 500MB
+      - name: Split into 4 equal parts
         run: |
+          SIZE=$(stat -c%s full.pkg)
+          PART_SIZE=$(( (SIZE + NUM_PARTS - 1) / NUM_PARTS ))
+          # bulatkan ke MB terdekat biar rapi
+          PART_SIZE_MB=$(( PART_SIZE / 1024 / 1024 + 1 ))
+          echo "Total size: $SIZE bytes"
+          echo "Part size: ${PART_SIZE_MB}MB"
           mkdir -p parts
-          split -b ${PART_SIZE} -d -a 3 full.pkg parts/${BASE_NAME}.part
+          split -b ${PART_SIZE_MB}M -d -a 1 full.pkg parts/${BASE_NAME}.part
+          echo "Hasil split:"
           ls -lh parts/
+          echo "Jumlah part: $(ls parts | wc -l)"
 
       - name: Bundle parts
         run: |
@@ -121,10 +128,10 @@ jobs:
     needs: download-and-split
     runs-on: ubuntu-latest
     strategy:
-      max-parallel: 3
+      max-parallel: 2
       fail-fast: false
       matrix:
-        part: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
+        part: [0,1,2,3]   # split -a 1 → suffix 0..3 (4 part)
 
     steps:
       - uses: actions/download-artifact@v4
@@ -139,13 +146,14 @@ jobs:
       - name: Pick part
         id: pick
         run: |
-          PART_NUM=$(printf "%03d" ${{ matrix.part }})
-          FILE="parts/${BASE_NAME}.part${PART_NUM}"
+          FILE="parts/${BASE_NAME}.part${{ matrix.part }}"
           if [ -f "$FILE" ]; then
             echo "file=$FILE" >> $GITHUB_OUTPUT
             echo "found=true" >> $GITHUB_OUTPUT
+            ls -lh "$FILE"
           else
             echo "found=false" >> $GITHUB_OUTPUT
+            echo "Part ${{ matrix.part }} tidak ada — cek log split di job pertama"
           fi
 
       - name: Upload part
