@@ -1,4 +1,4 @@
-name: Download MediaFire PKG, Split 4 Rata, Upload
+name: Download MediaFire via FlareSolverr, Upload Utuh
 
 on:
   push:
@@ -8,12 +8,11 @@ on:
   workflow_dispatch:
 
 env:
-  MEDIAFIRE_URL: 'https://www.mediafire.com/file_premium/3nr4ucevosspsgn/NARUTO_PS3_MODPACK_PART_3.pkg'
-  BASE_NAME: 'NARUTO_PS3_MODPACK_PART_3'
-  NUM_PARTS: 4
+  MEDIAFIRE_URL: 'https://www.mediafire.com/file_premium/p94ug5cc2rt30iw/ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4.pkg'
+  BASE_NAME: 'ZUKO3H_01GM_N4RU705H1PPUD3N-UNSR4'
 
 jobs:
-  download-and-split:
+  download-and-upload:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -39,7 +38,6 @@ jobs:
         run: |
           cat > solve.js << 'EOF'
           const fs = require('fs');
-
           (async () => {
             const url = process.env.MEDIAFIRE_URL;
             const body = {
@@ -47,20 +45,16 @@ jobs:
               url: url,
               maxTimeout: 120000
             };
-
             const resp = await fetch('http://localhost:8191/v1', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(body)
             });
-
             const data = await resp.json();
             console.log('Status:', data.status);
-
             if (data.status !== 'ok') {
               throw new Error('FlareSolverr gagal: ' + JSON.stringify(data.message));
             }
-
             const html = data.solution.response;
             const match = html.match(/id="downloadButton"[^>]*href="([^"]+)"/);
             if (!match) {
@@ -73,7 +67,6 @@ jobs:
               console.log('Direct link:', match2[1]);
               return;
             }
-
             fs.writeFileSync('direct_link.txt', match[1]);
             console.log('Direct link:', match[1]);
           })().catch(err => {
@@ -83,84 +76,24 @@ jobs:
           EOF
           node solve.js
 
-      - name: Download file
+      - name: Download file (utuh)
         run: |
           DIRECT_LINK=$(cat direct_link.txt)
           echo "Downloading from: $DIRECT_LINK"
           curl -L --retry 3 --retry-delay 5 \
             -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-            -o "full.pkg" \
+            -o "${BASE_NAME}.pkg" \
             "$DIRECT_LINK"
-          ls -lh full.pkg
-          if file full.pkg | grep -qi "HTML"; then
+          ls -lh "${BASE_NAME}.pkg"
+          if file "${BASE_NAME}.pkg" | grep -qi "HTML"; then
             echo "File HTML, gagal download"
             exit 1
           fi
 
-      - name: Split into 4 equal parts
-        run: |
-          SIZE=$(stat -c%s full.pkg)
-          PART_SIZE=$(( (SIZE + NUM_PARTS - 1) / NUM_PARTS ))
-          # bulatkan ke MB terdekat biar rapi
-          PART_SIZE_MB=$(( PART_SIZE / 1024 / 1024 + 1 ))
-          echo "Total size: $SIZE bytes"
-          echo "Part size: ${PART_SIZE_MB}MB"
-          mkdir -p parts
-          split -b ${PART_SIZE_MB}M -d -a 1 full.pkg parts/${BASE_NAME}.part
-          echo "Hasil split:"
-          ls -lh parts/
-          echo "Jumlah part: $(ls parts | wc -l)"
-
-      - name: Bundle parts
-        run: |
-          tar -cf parts.tar -C parts .
-          ls -lh parts.tar
-
-      - name: Upload bundle
+      - name: Upload file utuh
         uses: actions/upload-artifact@v4
         with:
-          name: parts-bundle
-          path: parts.tar
-          retention-days: 1
-          compression-level: 0
-
-  upload-parts:
-    needs: download-and-split
-    runs-on: ubuntu-latest
-    strategy:
-      max-parallel: 2
-      fail-fast: false
-      matrix:
-        part: [0,1,2,3]   # split -a 1 → suffix 0..3 (4 part)
-
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: parts-bundle
-
-      - name: Extract
-        run: |
-          mkdir -p parts
-          tar -xf parts.tar -C parts
-
-      - name: Pick part
-        id: pick
-        run: |
-          FILE="parts/${BASE_NAME}.part${{ matrix.part }}"
-          if [ -f "$FILE" ]; then
-            echo "file=$FILE" >> $GITHUB_OUTPUT
-            echo "found=true" >> $GITHUB_OUTPUT
-            ls -lh "$FILE"
-          else
-            echo "found=false" >> $GITHUB_OUTPUT
-            echo "Part ${{ matrix.part }} tidak ada — cek log split di job pertama"
-          fi
-
-      - name: Upload part
-        if: steps.pick.outputs.found == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.BASE_NAME }}_part${{ matrix.part }}
-          path: ${{ steps.pick.outputs.file }}
+          name: ${{ env.BASE_NAME }}
+          path: ${{ env.BASE_NAME }}.pkg
           retention-days: 7
           compression-level: 0
