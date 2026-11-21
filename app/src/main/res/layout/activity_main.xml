@@ -84,7 +84,7 @@
                     android:id="@+id/btnVerify"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="VERIFY & PUSH WORKFLOW"
+                    android:text="VERIFY &amp; PUSH WORKFLOW"
                     android:backgroundTint="#FFD32F2F"
                     android:textColor="#FFFFFFFF"/>
             </LinearLayout>
