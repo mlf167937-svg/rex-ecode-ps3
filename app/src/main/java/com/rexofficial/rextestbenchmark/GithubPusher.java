@@ -102,7 +102,7 @@ public class GithubPusher {
                     .call();
             git.close();
             return true;
-        } catch (GitAPIException | java.io.IOException e) {
+        } catch (GitAPIException | java.io.IOException | java.net.URISyntaxException e) {
             return false;
         } finally {
             deleteDir(workDir);
