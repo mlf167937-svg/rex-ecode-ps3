@@ -40,6 +40,6 @@ dependencies {
     implementation 'androidx.security:security-crypto:1.1.0-alpha06'
     implementation 'org.eclipse.jgit:org.eclipse.jgit:6.10.0.202406032230-r'
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
-    implementation 'org.geckoview:geckoview:119.0.20231204160245'
+    implementation 'org.mozilla.geckoview:geckoview:148.0.20260216153405'
     implementation 'com.google.code.gson:gson:2.11.0'
 }
